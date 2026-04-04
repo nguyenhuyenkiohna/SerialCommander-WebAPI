@@ -1,7 +1,14 @@
 const passport = require("passport");
+const bcrypt = require("bcryptjs");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const { User } = require("../models");
 const googleConfig = require("./googleOAuth");
+
+// Chuỗi hash cố định (không rỗng) — MySQL NOT NULL + Sequelize có thể bỏ qua password: "" trong INSERT
+const GOOGLE_OAUTH_PASSWORD_PLACEHOLDER = bcrypt.hashSync(
+  "__SERIALCOMMANDER_GOOGLE_OAUTH_NO_LOCAL_LOGIN__",
+  10
+);
 
 // Serialize user for session
 passport.serializeUser((user, done) => {
@@ -46,17 +53,20 @@ passport.use(
         if (user) {
           user.googleId = profile.id;
           user.provider = "google";
+          user.isVerified = true;
           await user.save();
           return done(null, user);
         }
 
-        // Tạo user mới
+        // Tạo user mới — cột password NOT NULL: dùng placeholder hash (đăng nhập local vẫn bị chặn vì provider === "google")
         user = await User.create({
           googleId: profile.id,
           email,
           username: profile.displayName || email.split("@")[0],
+          password: GOOGLE_OAUTH_PASSWORD_PLACEHOLDER,
           provider: "google",
           role: "user",
+          isVerified: true,
         });
 
         return done(null, user);

@@ -1,4 +1,5 @@
-require("dotenv").config();
+// NOTE: dotenv is loaded centrally in index.js with the correct env file path.
+// Do NOT call require("dotenv").config() here — it would load the wrong file.
 
 module.exports = {
   environment: process.env.DATABASE_ENV || "development",

@@ -3,7 +3,7 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const { User, PasswordReset } = require("../../models");
 const passport = require("../../configs/passport");
-const { sendPasswordResetEmail } = require("../../utils/emailService");
+const { sendPasswordResetEmail, sendEmailVerificationCodeEmail } = require("../../utils/emailService");
 
 const JWT_SECRET = process.env.JWT_SECRET || "secretKey";
 
@@ -14,6 +14,8 @@ const generateToken = (user) => {
     { expiresIn: "1d" }
   );
 };
+
+const createOtpCode = () => crypto.randomInt(100000, 1000000).toString();
 
 exports.login = async (req, res) => {
   const { username, password } = req.body;
@@ -30,6 +32,15 @@ exports.login = async (req, res) => {
     // Kiểm tra nếu user đăng nhập bằng Google (không có password)
     if (user.provider === "google" || !user.password) {
       return res.status(401).json({ message: "Tài khoản này đăng nhập bằng Google. Vui lòng sử dụng đăng nhập Google." });
+    }
+
+    // Tài khoản local bắt buộc phải xác thực email trước (dùng !== true để bắt cả trường hợp DB thiếu cột isVerified → undefined)
+    if (user.provider === "local" && user.isVerified !== true) {
+      return res.status(400).json({
+        message: "Tài khoản chưa được xác thực email. Vui lòng kiểm tra email và nhập mã xác thực.",
+        code: "EMAIL_NOT_VERIFIED",
+        email: user.email,
+      });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -75,12 +86,56 @@ exports.register = async (req, res) => {
       email,
       role: "user", // mặc định
       provider: "local",
+      isVerified: false,
     });
 
-    res.status(201).json({ message: "Đăng ký thành công" });
+    // Tạo mã xác thực email (6 chữ số), hết hạn sau 15 phút
+    const verifyCode = createOtpCode();
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + 15);
+
+    // Xóa mã cũ nếu có (cùng user) rồi tạo mã mới
+    await PasswordReset.destroy({ where: { UserId: newUser.id } });
+    await PasswordReset.create({
+      UserId: newUser.id,
+      email,
+      resetCode: verifyCode,
+      expiresAt,
+      used: false,
+    });
+
+    try {
+      await sendEmailVerificationCodeEmail(email, verifyCode);
+    } catch (emailError) {
+      console.error("Send verification email error:", emailError);
+      return res.status(201).json({
+        message: "Đăng ký thành công nhưng chưa gửi được email xác thực. Vui lòng yêu cầu gửi lại mã xác thực.",
+        requireEmailVerification: true,
+        email,
+        emailSent: false,
+      });
+    }
+
+    res.status(201).json({
+      message: "Đăng ký thành công. Vui lòng kiểm tra email để xác thực tài khoản.",
+      requireEmailVerification: true,
+      email,
+      emailSent: true,
+    });
   } catch (error) {
+    const sqlMsg = error.parent?.sqlMessage || "";
     console.error("Register error:", error);
-    
+    if (sqlMsg) console.error("SQL:", sqlMsg);
+
+    // Thiếu cột / schema (hay gặp: bảng PasswordResets chưa có UserId)
+    if (sqlMsg && (/Unknown column/i.test(sqlMsg) || /doesn't exist/i.test(sqlMsg))) {
+      return res.status(500).json({
+        message:
+          "Lỗi cơ sở dữ liệu khi đăng ký (schema có thể chưa đồng bộ). Kiểm tra bảng PasswordResets có cột UserId; xem file migrations/2026-01-06_add_userid_to_passwordresets.sql và log server (pm2 logs).",
+        code: "DB_SCHEMA",
+      });
+    }
+
     // Xử lý lỗi duplicate entry từ database
     if (error.name === 'SequelizeUniqueConstraintError' || error.code === 'ER_DUP_ENTRY') {
       if (error.fields && error.fields.email) {
@@ -100,6 +155,93 @@ exports.register = async (req, res) => {
 
     // Lỗi khác
     res.status(500).json({ message: "Lỗi server. Vui lòng thử lại sau." });
+  }
+};
+
+// Verify email code after register
+exports.verifyEmail = async (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) {
+    return res.status(400).json({ message: "Email và mã xác thực là bắt buộc" });
+  }
+
+  try {
+    const user = await User.findOne({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ message: "Người dùng không tồn tại" });
+    }
+
+    if (user.provider !== "local") {
+      return res.status(400).json({ message: "Tài khoản không yêu cầu xác thực email bằng mã." });
+    }
+
+    if (user.isVerified) {
+      return res.status(200).json({ message: "Tài khoản đã được xác thực trước đó." });
+    }
+
+    const verifyRecord = await PasswordReset.findOne({
+      where: {
+        UserId: user.id,
+        resetCode: code,
+        used: false,
+      },
+    });
+    if (!verifyRecord) {
+      return res.status(400).json({ message: "Mã xác thực không hợp lệ hoặc đã được sử dụng" });
+    }
+
+    if (new Date() > verifyRecord.expiresAt) {
+      return res.status(400).json({ message: "Mã xác thực đã hết hạn. Vui lòng yêu cầu mã mới." });
+    }
+
+    await user.update({ isVerified: true });
+    await verifyRecord.update({ used: true });
+    await PasswordReset.destroy({ where: { UserId: user.id, used: true } });
+
+    return res.status(200).json({ message: "Xác thực email thành công. Bạn có thể đăng nhập." });
+  } catch (error) {
+    console.error("Verify email error:", error);
+    return res.status(500).json({ message: "Lỗi server. Vui lòng thử lại sau." });
+  }
+};
+
+// Resend email verification code for local account
+exports.resendVerificationCode = async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ message: "Email là bắt buộc" });
+  }
+
+  try {
+    const user = await User.findOne({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ message: "Người dùng không tồn tại" });
+    }
+    if (user.provider !== "local") {
+      return res.status(400).json({ message: "Tài khoản không yêu cầu xác thực email bằng mã." });
+    }
+    if (user.isVerified) {
+      return res.status(200).json({ message: "Tài khoản đã được xác thực trước đó." });
+    }
+
+    const verifyCode = createOtpCode();
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + 15);
+
+    await PasswordReset.destroy({ where: { UserId: user.id } });
+    await PasswordReset.create({
+      UserId: user.id,
+      email,
+      resetCode: verifyCode,
+      expiresAt,
+      used: false,
+    });
+
+    await sendEmailVerificationCodeEmail(email, verifyCode);
+    return res.status(200).json({ message: "Đã gửi lại mã xác thực email." });
+  } catch (error) {
+    console.error("Resend verification code error:", error);
+    return res.status(500).json({ message: "Lỗi server. Vui lòng thử lại sau." });
   }
 };
 
@@ -154,6 +296,12 @@ exports.requestPasswordReset = async (req, res) => {
     if (user.provider === "google" || !user.password) {
       return res.status(400).json({ 
         message: "Tài khoản này đăng nhập bằng Google. Vui lòng sử dụng đăng nhập Google." 
+      });
+    }
+
+    if (user.provider === "local" && user.isVerified !== true) {
+      return res.status(400).json({
+        message: "Tài khoản chưa xác thực email. Vui lòng xác thực email trước khi đặt lại mật khẩu."
       });
     }
 

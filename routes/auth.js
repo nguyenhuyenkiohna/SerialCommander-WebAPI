@@ -59,6 +59,8 @@ router.post("/login", authController.login);
  *         description: Email hoặc username đã tồn tại
  */
 router.post("/register", authController.register);
+router.post("/verify-email", authController.verifyEmail);
+router.post("/resend-verification-code", authController.resendVerificationCode);
 
 /**
  * @swagger

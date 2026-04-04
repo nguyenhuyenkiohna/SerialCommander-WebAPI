@@ -2,7 +2,7 @@ const nodemailer = require("nodemailer");
 
 /**
  * Tạo transporter cho email service
- * Hỗ trợ Gmail, SMTP custom, hoặc test account
+ * Hỗ trợ Gmail, SMTP custom, hoặc Ethereal (chỉ dev/test khi có ETHEREAL_*)
  */
 const createTransporter = () => {
   // Nếu có SMTP config, dùng SMTP
@@ -29,16 +29,28 @@ const createTransporter = () => {
     });
   }
 
-  // Development: Dùng test account (ethereal.email)
-  // Hoặc có thể dùng Mailtrap, Mailgun, SendGrid, etc.
-  return nodemailer.createTransport({
-    host: "smtp.ethereal.email",
-    port: 587,
-    auth: {
-      user: process.env.ETHEREAL_USER || "test@ethereal.email",
-      pass: process.env.ETHEREAL_PASS || "test",
-    },
-  });
+  // Production: không được gửi mail “im lặng” bằng tài khoản giả — bắt buộc cấu hình SMTP hoặc Gmail
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "Chưa cấu hình gửi email: đặt SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD hoặc GMAIL_USER + GMAIL_APP_PASSWORD trong .env (server)."
+    );
+  }
+
+  // Development/test: Ethereal chỉ khi có ETHEREAL_USER/PASS; nếu không thì báo rõ
+  if (process.env.ETHEREAL_USER && process.env.ETHEREAL_PASS) {
+    return nodemailer.createTransport({
+      host: "smtp.ethereal.email",
+      port: 587,
+      auth: {
+        user: process.env.ETHEREAL_USER,
+        pass: process.env.ETHEREAL_PASS,
+      },
+    });
+  }
+
+  throw new Error(
+    "Chưa cấu hình gửi email: local/dev cần SMTP_* hoặc GMAIL_* hoặc ETHEREAL_USER + ETHEREAL_PASS (xem .env.example)."
+  );
 };
 
 /**
@@ -139,8 +151,53 @@ const sendPasswordResetEmail = async (to, resetCode) => {
   }
 };
 
+/**
+ * Gửi email xác thực tài khoản mới (local account)
+ * @param {string} to
+ * @param {string} verificationCode
+ */
+const sendEmailVerificationCodeEmail = async (to, verificationCode) => {
+  try {
+    const transporter = createTransporter();
+    const appName = process.env.APP_NAME || "Serial Commander";
+
+    const mailOptions = {
+      from: process.env.EMAIL_FROM || `"${appName}" <noreply@serialcommander.com>`,
+      to,
+      subject: `[${appName}] Mã xác thực tài khoản`,
+      html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <h2 style="margin-bottom: 4px;">${appName}</h2>
+          <p style="margin-top: 0;">Xác thực tài khoản</p>
+          <p>Chào bạn,</p>
+          <p>Cảm ơn bạn đã đăng ký tài khoản. Vui lòng nhập mã xác thực sau để kích hoạt tài khoản:</p>
+          <div style="font-size: 28px; font-weight: bold; letter-spacing: 6px; color: #1d4ed8; margin: 16px 0;">
+            ${verificationCode}
+          </div>
+          <p>Mã có hiệu lực trong <strong>15 phút</strong> và chỉ dùng 1 lần.</p>
+          <p>Nếu bạn không thực hiện thao tác này, vui lòng bỏ qua email.</p>
+        </div>
+      `,
+      text: `
+${appName} - Xác thực tài khoản
+
+Mã xác thực của bạn là: ${verificationCode}
+Mã có hiệu lực trong 15 phút và chỉ dùng 1 lần.
+      `,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log("Email verification code sent:", info.messageId);
+    return { success: true, messageId: info.messageId };
+  } catch (error) {
+    console.error("Error sending verification email:", error);
+    throw error;
+  }
+};
+
 module.exports = {
   sendPasswordResetEmail,
+  sendEmailVerificationCodeEmail,
   createTransporter,
 };
 

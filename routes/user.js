@@ -8,7 +8,7 @@ router.get("/profile", verifyToken, async (req, res) => {
   try {
     // Lấy thông tin đầy đủ từ database
     const user = await User.findByPk(req.user.id, {
-      attributes: ['id', 'username', 'email', 'role', 'provider', 'googleId']
+      attributes: ["id", "username", "email", "role", "provider", "googleId", "isVerified"],
     });
 
     if (!user) {
@@ -22,8 +22,9 @@ router.get("/profile", verifyToken, async (req, res) => {
         username: user.username,
         email: user.email,
         role: user.role,
-        provider: user.provider || 'local'
-      }
+        provider: user.provider || "local",
+        isVerified: user.isVerified === true,
+      },
     });
   } catch (error) {
     console.error("Error fetching user profile:", error);

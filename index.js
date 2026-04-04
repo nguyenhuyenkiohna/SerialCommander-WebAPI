@@ -1,5 +1,8 @@
+const envFile =
+  process.env.ENV_FILE ||
+  (process.env.NODE_ENV === "production" ? "./.env.production" : "./.env.local");
 require("dotenv").config({
-  path: "./.env",
+  path: envFile,
 });
 require("rootpath")();
 const express = require("express");
@@ -33,23 +36,37 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 // CORS configuration - allow credentials for OAuth
-app.use(cors({
-  origin: (origin, cb) => {
-    const allowed = process.env.FRONTEND_URL || "http://localhost:5173";
-    // Cho phép requests không có origin (mobile apps, curl, Postman)
-    if (!origin) return cb(null, true);
-    // Cho phép FRONTEND_URL cấu hình qua env
-    if (origin === allowed) return cb(null, true);
-    // Trong môi trường development, cho phép localhost bất kỳ port
-    if (process.env.NODE_ENV !== "production") {
-      if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) {
-        return cb(null, true);
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // Cho phép requests không có origin (curl, Postman, server-to-server)
+      if (!origin) return cb(null, true);
+
+      // Hỗ trợ nhiều origin qua FRONTEND_URLS (csv), fallback FRONTEND_URL
+      const configured = process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "http://localhost:5173";
+      const allowlist = configured
+        .split(",")
+        .map((x) => x.trim().replace(/\/+$/, ""))
+        .filter(Boolean);
+      const normalizedOrigin = origin.replace(/\/+$/, "");
+
+      if (allowlist.includes(normalizedOrigin)) return cb(null, true);
+
+      // Trong môi trường non-production, cho phép localhost bất kỳ port
+      if (process.env.NODE_ENV !== "production") {
+        if (
+          normalizedOrigin.startsWith("http://localhost:") ||
+          normalizedOrigin.startsWith("http://127.0.0.1:")
+        ) {
+          return cb(null, true);
+        }
       }
-    }
-    cb(new Error(`CORS: origin '${origin}' không được phép`));
-  },
-  credentials: true,
-}));
+
+      return cb(new Error(`CORS: origin '${origin}' không được phép`));
+    },
+    credentials: true,
+  })
+);
 
 // Thêm dòng này để phục vụ các tệp trong thư mục uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
