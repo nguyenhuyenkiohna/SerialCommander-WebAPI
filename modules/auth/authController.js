@@ -301,11 +301,8 @@ exports.requestPasswordReset = async (req, res) => {
       });
     }
 
-    if (user.provider === "local" && user.isVerified !== true) {
-      return res.status(400).json({
-        message: "Tài khoản chưa xác thực email. Vui lòng xác thực email trước khi đặt lại mật khẩu."
-      });
-    }
+    // Cho phép local account reset password ngay cả khi chưa verify email.
+    // Mục tiêu: mọi email đã đăng ký local đều có thể nhận mã reset khi bấm "quên mật khẩu".
 
     // Tạo mã reset 6 chữ số bằng CSPRNG
     const resetCode = crypto.randomInt(100000, 1000000).toString();
