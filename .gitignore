@@ -1,5 +1,6 @@
 node_modules
 upload
 .env
+.DS_Store
 **/serviceAccountKey.json
 firebase_mgnt/venv/
