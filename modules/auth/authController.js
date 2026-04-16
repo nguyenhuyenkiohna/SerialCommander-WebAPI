@@ -249,12 +249,13 @@ exports.resendVerificationCode = async (req, res) => {
 exports.googleAuth = (req, res, next) => {
   passport.authenticate("google", {
     scope: ["profile", "email"],
+    state: true,
   })(req, res, next);
 };
 
 // Google OAuth - handle callback
 exports.googleCallback = (req, res, next) => {
-  passport.authenticate("google", { session: false }, (err, user) => {
+  passport.authenticate("google", { session: true }, (err, user) => {
     if (err) {
       console.error("Google OAuth error:", err);
       return res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/login?error=oauth_failed`);
@@ -267,8 +268,9 @@ exports.googleCallback = (req, res, next) => {
     // Generate JWT token
     const token = generateToken(user);
 
-    // Redirect to frontend with token
-    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/login?token=${token}`);
+    // Không đưa JWT qua query string (dễ rò qua logs/referer). Dùng URL fragment (#) để FE đọc,
+    // fragment không được gửi lên server trong HTTP request.
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/login#token=${token}`);
   })(req, res, next);
 };
 

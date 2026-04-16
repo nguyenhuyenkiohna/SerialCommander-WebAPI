@@ -47,13 +47,20 @@ passport.use(
           return done(null, user);
         }
 
-        // Tìm user với email đã tồn tại (merge account)
+        // Tìm user với email đã tồn tại (link account)
         user = await User.findOne({ where: { email } });
 
         if (user) {
           user.googleId = profile.id;
-          user.provider = "google";
-          user.isVerified = true;
+          // Không đổi provider để tránh "nuốt" tài khoản local hiện có.
+          // Nếu user vốn là local thì vẫn cho phép đăng nhập bằng password/forgot-password như cũ.
+          if (user.provider === "google") {
+            user.isVerified = true;
+          }
+          if (user.provider === "local") {
+            // Với local account, có thể coi là đã xác thực email nếu Google xác thực email
+            user.isVerified = true;
+          }
           await user.save();
           return done(null, user);
         }
