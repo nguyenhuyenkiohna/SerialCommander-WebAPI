@@ -286,12 +286,8 @@ exports.requestPasswordReset = async (req, res) => {
     // Kiểm tra user có tồn tại không
     const user = await User.findOne({ where: { email } });
     
-    // Không tiết lộ email có tồn tại hay không (security best practice)
     if (!user) {
-      // Vẫn trả về success để không tiết lộ thông tin
-      return res.json({ 
-        message: "Nếu email tồn tại trong hệ thống, bạn sẽ nhận được mã đặt lại mật khẩu qua email." 
-      });
+      return res.status(404).json({ message: "Email này chưa được đăng ký tài khoản." });
     }
 
     // Kiểm tra user có password không (không cho reset password của Google OAuth users)

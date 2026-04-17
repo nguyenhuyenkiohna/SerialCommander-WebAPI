@@ -273,15 +273,15 @@ describe("POST /api/auth/register", () => {
 // ─── FORGOT PASSWORD TESTS ──────────────────────────────────────────────────
 
 describe("POST /api/auth/forgot-password", () => {
-  test("✅ Trả về success dù email không tồn tại (security - không tiết lộ)", async () => {
+  test("❌ Trả về 404 khi email không tồn tại", async () => {
     User.findOne.mockResolvedValue(null);
 
     const res = await request(app).post("/api/auth/forgot-password").send({
       email: "notexist@test.com",
     });
 
-    expect(res.status).toBe(200);
-    expect(res.body.message).toMatch(/nếu email tồn tại/i);
+    expect(res.status).toBe(404);
+    expect(res.body.message).toMatch(/chưa được đăng ký/i);
   });
 
   test("✅ Gửi email thành công khi email hợp lệ", async () => {
