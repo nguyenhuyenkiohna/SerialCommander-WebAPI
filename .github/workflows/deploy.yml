@@ -1,0 +1,47 @@
+name: Backend Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run tests before deploy
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-key-minimum-16
+          SESSION_SECRET: test-session-secret-key-minimum-16
+        run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Run remote deploy script
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          passphrase: ${{ secrets.DEPLOY_SSH_PASSPHRASE }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_APP_DIR }}"
+            git pull --ff-only origin main
+            AUTO_RUN_MIGRATION=true AUTO_APPROVE_MIGRATION=true AUTO_RELOAD_PM2=true ENV_FILE=.env ./scripts/deploy.sh

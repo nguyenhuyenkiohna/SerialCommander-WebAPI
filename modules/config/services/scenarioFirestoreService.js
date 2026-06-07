@@ -1,4 +1,5 @@
 const { getFirestore, getAdmin, isFirebaseReady } = require("../../../kernels/firebaseAdmin");
+const { logWarn } = require("../../../kernels/logging/appLogger");
 const firebaseStorageService = require("./firebaseStorageService");
 
 const COLLECTION =
@@ -20,16 +21,39 @@ function assertFirestore() {
  * @param {Array} contentArray
  */
 exports.saveScenarioContent = async (scenarioId, contentArray) => {
+  await exports.batchSaveScenarioContent([
+    { scenarioId, content: Array.isArray(contentArray) ? contentArray : [] },
+  ]);
+};
+
+/**
+ * Batch Write Firestore cho nhiều scenario (worker outbox).
+ * @param {{ scenarioId: string, content: Array }[]} items
+ */
+exports.batchSaveScenarioContent = async (items) => {
+  if (!items?.length) return;
   assertFirestore();
   const db = getFirestore();
   const admin = getAdmin();
-  await db.collection(COLLECTION).doc(scenarioId).set({
-    content: Array.isArray(contentArray) ? contentArray : [],
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-  await firebaseStorageService.saveScenarioJsonSnapshot(
-    scenarioId,
-    Array.isArray(contentArray) ? contentArray : []
+  const batch = db.batch();
+
+  for (const item of items) {
+    const ref = db.collection(COLLECTION).doc(item.scenarioId);
+    batch.set(ref, {
+      content: Array.isArray(item.content) ? item.content : [],
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+
+  await batch.commit();
+
+  await Promise.allSettled(
+    items.map((item) =>
+      firebaseStorageService.saveScenarioJsonSnapshot(
+        item.scenarioId,
+        Array.isArray(item.content) ? item.content : []
+      )
+    )
   );
 };
 
@@ -42,34 +66,53 @@ exports.getScenarioContentArray = async (scenarioId) => {
   if (!db) {
     return null;
   }
-  const snap = await db.collection(COLLECTION).doc(scenarioId).get();
-  if (!snap.exists) {
+  try {
+    const snap = await db.collection(COLLECTION).doc(scenarioId).get();
+    if (!snap.exists) {
+      return null;
+    }
+    const data = snap.data();
+    if (Array.isArray(data.content)) {
+      return data.content.length > 0 ? data.content : null;
+    }
+    if (Array.isArray(data.Content)) {
+      return data.Content.length > 0 ? data.Content : null;
+    }
+    return null;
+  } catch (e) {
+    logWarn("[scenario-firestore] đọc Firestore thất bại — dùng Content MySQL", {
+      scenarioId,
+      message: e.message || String(e),
+      code: e.code,
+    });
     return null;
   }
-  const data = snap.data();
-  if (Array.isArray(data.content)) {
-    return data.content;
-  }
-  if (Array.isArray(data.Content)) {
-    return data.Content;
-  }
-  return null;
 };
 
 /**
  * Xóa document kịch bản trên Firestore (best-effort nếu Firebase tắt).
  */
 exports.deleteScenarioContent = async (scenarioId) => {
+  await exports.batchDeleteScenarioContent([scenarioId]);
+};
+
+/**
+ * @param {string[]} scenarioIds
+ */
+exports.batchDeleteScenarioContent = async (scenarioIds) => {
+  if (!scenarioIds?.length) return;
   const db = getFirestore();
-  if (!db) {
-    return;
+  if (!db) return;
+
+  const batch = db.batch();
+  for (const scenarioId of scenarioIds) {
+    batch.delete(db.collection(COLLECTION).doc(scenarioId));
   }
-  try {
-    await db.collection(COLLECTION).doc(scenarioId).delete();
-  } catch (e) {
-    console.error("[firebase] Xóa scenario Firestore thất bại:", scenarioId, e.message);
-  }
-  await firebaseStorageService.deleteScenarioJsonSnapshot(scenarioId);
+  await batch.commit();
+
+  await Promise.allSettled(
+    scenarioIds.map((id) => firebaseStorageService.deleteScenarioJsonSnapshot(id))
+  );
 };
 
 exports.getScenariosCollectionName = () => COLLECTION;

@@ -1,5 +1,8 @@
-module.exports = {
-    secret : process.env.JWT_SECRET || 'secret',
+const { getJwtSecret } = require("./envSecrets");
 
-    ttl: '999h'
-}
+module.exports = {
+  get secret() {
+    return getJwtSecret();
+  },
+  ttl: process.env.JWT_TTL || "1d",
+};

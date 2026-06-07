@@ -1,127 +1,203 @@
+"""
+Deploy back-end lên máy chủ api.toolhub.app (khác máy front serial.toolhub.app).
+
+Khớp hướng dẫn thầy — không dùng user/path cũ ``dev`` / ``/home/dev/...``:
+  • SSH: huyenntt @ api.toolhub.app
+  • Thư mục dự án trên server: /home/huyenntt/serialcommander_webapi
+  • Quyền làm việc dưới /home/huyenntt (thư mục con nằm trong đó).
+
+Giá trị cụ thể đọc từ deploy-config.json (mặc định mẫu: deploy-config.example.json).
+Sau upload: npm install --omit=dev trên server, pm2 reload pm2.config.js.
+
+Chạy (tên file có dấu cách → bắt buộc ngoặc kép):
+  python3 "release 2.py"
+Hoặc: npm run deploy
+Hoặc giống thứ tự thầy (build API là bước kiểm tra nhẹ + deploy): npm run release
+
+Mật khẩu SSH: DEPLOY_PASSWORD=... hoặc nhập khi được hỏi — không commit mật khẩu.
+"""
 import paramiko
 import getpass
 import os
+import json
 from stat import S_ISDIR
 
-# --- Cấu hình ---
-source_items_str = 'configs kernels models modules routes tests utils server.js package.json package-lock.json index.js .env.production pm2.config.js'
-source_items = source_items_str.split()
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "deploy-config.json")
 
-# username = "dev"
-# remote_host = "api.toolhub.app"
-# remote_path = "/home/dev/serialcommander_webapi"
-# --- Cấu hình ---
-username = "huyenntt" # ĐỔI TỪ 'dev' THÀNH 'huyenntt'
-remote_host = "api.toolhub.app"
-remote_path = "/home/huyenntt/serialcommander_webapi" # ĐỔI 'dev' THÀNH 'huyenntt'
 
-# --- Hàm copy đệ quy ---
+def load_config():
+    if not os.path.isfile(CONFIG_PATH):
+        print(
+            f"Thiếu {CONFIG_PATH}\n"
+            f"Sao chép: cp deploy-config.example.json deploy-config.json\n"
+            f"rồi điền host/user/path (không commit deploy-config.json)."
+        )
+        raise SystemExit(1)
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_required(cfg, key):
+    value = cfg.get(key)
+    if value is None or value == "":
+        raise ValueError(f"Thiếu cấu hình bắt buộc trong deploy-config.json: {key}")
+    return value
+
+
 def sftp_recursive_put(sftp, local_dir, remote_dir):
-    """
-    Copy thư mục và nội dung bên trong một cách đệ quy từ cục bộ lên máy chủ từ xa.
-    Đảm bảo đường dẫn đích luôn dùng forward-slash ('/').
-    """
-    # CHUYỂN ĐỔI: Đảm bảo remote_dir dùng '/'
-    remote_dir = remote_dir.replace('\\', '/')
+    remote_dir = remote_dir.replace("\\", "/")
     print(f"  -> Đang copy thư mục: {local_dir} -> {remote_dir}")
-    
-    # 1. Tạo thư mục từ xa nếu chưa có
+
     try:
         sftp.stat(remote_dir)
     except FileNotFoundError:
         sftp.mkdir(remote_dir)
 
-    # 2. Duyệt qua nội dung thư mục cục bộ
     for entry in os.listdir(local_dir):
         local_path = os.path.join(local_dir, entry)
-        # Sử dụng os.path.join (có thể tạo '\' trên Windows) và sau đó thay thế
-        remote_path_entry = os.path.join(remote_dir, entry).replace('\\', '/')
+        remote_path_entry = os.path.join(remote_dir, entry).replace("\\", "/")
 
         if S_ISDIR(os.stat(local_path).st_mode):
-            # Nếu là thư mục, gọi đệ quy
             sftp_recursive_put(sftp, local_path, remote_path_entry)
         else:
-            # Nếu là tệp, copy lên (Hành vi mặc định là ghi đè)
             print(f"     Copy tệp: {local_path} -> {remote_path_entry}")
             sftp.put(local_path, remote_path_entry)
 
-# --- Nhập mật khẩu an toàn ---
-# Ưu tiên biến môi trường DEPLOY_PASSWORD, nếu không thì hỏi trực tiếp
-password = os.environ.get("DEPLOY_PASSWORD") or getpass.getpass(prompt=f"Mật khẩu tài khoản {username}: ")
 
-# --- Thiết lập kết nối SSH ---
-try:
-    # ... (Khởi tạo kết nối) ...
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
-    # 2. Kết nối
-    print(f"\nĐang kết nối đến {remote_host}...")
-    client.connect(remote_host, username=username, password=password)
-    print("Kết nối SSH thành công.")
-    # --------------------------------------------------------
+def main():
+    cfg = load_config()
+    username = get_required(cfg, "username")
+    remote_host = get_required(cfg, "remote_host")
+    remote_path = get_required(cfg, "remote_path")
+    source_items = cfg.get("source_items") or []
+    env_upload_local = cfg.get("env_upload_local", ".env.production")
+    env_remote_name = cfg.get("env_remote_name", ".env")
+    allow_unknown_host = bool(cfg.get("allow_unknown_host", False))
+    known_hosts_file = cfg.get("known_hosts_file")
 
-    # --- Copy tệp và thư mục (Sử dụng SFTP) ---
-    print("\nĐang copy các nguồn lực cần thiết lên máy chủ từ xa...")
-    sftp = client.open_sftp()
-    
-    # Tạo thư mục gốc từ xa nếu nó chưa tồn tại
+    os.chdir(SCRIPT_DIR)
+
+    raw_pw = os.environ.get("DEPLOY_PASSWORD") or getpass.getpass(
+        prompt=f"Mật khẩu SSH cho tài khoản {username}: "
+    )
+    password = (raw_pw or "").strip()
+    if not password:
+        print("Thiếu mật khẩu SSH.")
+        return 1
+
+    client = None
     try:
-        sftp.stat(remote_path)
-    except FileNotFoundError:
-        print(f"Thư mục từ xa {remote_path} không tồn tại. Đang tạo...")
-        sftp.mkdir(remote_path)
-
-    # Lặp qua danh sách source_items và sử dụng copy đệ quy nếu là thư mục
-    for item in source_items:
-        local_path = item
-        # SỬA LỖI WINDOWS/LINUX:
-        # 1. Tạo đường dẫn trên Windows
-        # 2. Thay thế tất cả '\' bằng '/'
-        remote_item = ".env" if item == ".env.production" else item
-        remote_dest = os.path.join(remote_path, remote_item).replace('\\', '/')
-        
-        if os.path.isdir(local_path):
-            sftp_recursive_put(sftp, local_path, remote_dest)
-        elif os.path.isfile(local_path):
-            print(f"  - Copy file: {item} -> {remote_dest}")
-            sftp.put(local_path, remote_dest)
+        client = paramiko.SSHClient()
+        if known_hosts_file:
+            client.load_host_keys(os.path.expanduser(known_hosts_file))
         else:
-             print(f"  - Bỏ qua mục không tìm thấy: {item}")
-            
-    sftp.close()
-    print("Copy hoàn tất.")
+            client.load_system_host_keys()
 
-    # --- Thực hiện lệnh từ xa (tương đương Invoke-SSHCommand) ---
-    def run_remote_command(command):
-        # ... (Giữ nguyên) ...
-        print(f"\nĐang thực thi lệnh: {command}")
-        stdin, stdout, stderr = client.exec_command(command)
-        print("--- Output ---")
-        print(stdout.read().decode())
-        print("--- Errors (nếu có) ---")
-        print(stderr.read().decode())
-        print("----------------")
-    
-    # ... (Lệnh npm install, pm2 reload, pm2 ls giữ nguyên) ...
-    command_install = f"cd {remote_path} && npm install --omit=dev --legacy-peer-deps"
-    run_remote_command(command_install)
+        if allow_unknown_host:
+            print("[CẢNH BÁO] allow_unknown_host=true: sẽ tự động chấp nhận host key mới.")
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
-    command_restart = f"cd {remote_path} && pm2 reload pm2.config.js"
-    run_remote_command(command_restart)
+        print(f"\nĐang kết nối đến {remote_host}...")
+        client.connect(
+            remote_host,
+            username=username,
+            password=password,
+            look_for_keys=True,
+            allow_agent=True,
+            timeout=30,
+        )
+        print("Kết nối SSH thành công.")
 
-    command_ls = f"cd {remote_path} && pm2 ls"
-    run_remote_command(command_ls)
-   
-except paramiko.AuthenticationException:
-# ... (Khối except và finally giữ nguyên) ...
-    print("\nLỗi: Xác thực thất bại. Vui lòng kiểm tra lại tên người dùng và mật khẩu.")
-except paramiko.SSHException as e:
-    print(f"\nLỗi SSH: {e}")
-except Exception as e:
-    print(f"\nĐã xảy ra lỗi: {e}")
-    
-finally:
-    if 'client' in locals() and client:
-        client.close()
-        print("\nĐã đóng kết nối SSH.")
+        print("\nĐang copy các nguồn lực cần thiết lên máy chủ từ xa...")
+        sftp = client.open_sftp()
+
+        try:
+            sftp.stat(remote_path)
+        except FileNotFoundError:
+            print(f"Thư mục từ xa {remote_path} không tồn tại. Đang tạo...")
+            sftp.mkdir(remote_path)
+
+        for item in source_items:
+            local_path = item
+            remote_item = env_remote_name if item == env_upload_local else item
+            remote_dest = os.path.join(remote_path, remote_item).replace("\\", "/")
+
+            if os.path.isdir(local_path):
+                sftp_recursive_put(sftp, local_path, remote_dest)
+            elif os.path.isfile(local_path):
+                print(f"  - Copy file: {item} -> {remote_dest}")
+                sftp.put(local_path, remote_dest)
+            else:
+                print(f"  - Bỏ qua mục không tìm thấy: {item}")
+
+        sftp.close()
+        print("Copy hoàn tất.")
+
+        def run_remote_command(command):
+            print(f"\nĐang thực thi lệnh: {command}")
+            stdin, stdout, stderr = client.exec_command(command)
+            print("--- Output ---")
+            print(stdout.read().decode())
+            print("--- Errors (nếu có) ---")
+            print(stderr.read().decode())
+            print("----------------")
+            exit_code = stdout.channel.recv_exit_status()
+            if exit_code != 0:
+                raise RuntimeError(f"Lệnh thất bại (exit={exit_code}): {command}")
+
+        command_install = f"cd {remote_path} && npm install --omit=dev --legacy-peer-deps"
+        run_remote_command(command_install)
+
+        command_preflight = f"cd {remote_path} && npm run preflight"
+        run_remote_command(command_preflight)
+
+        command_restart = f"cd {remote_path} && NODE_ENV=production pm2 reload pm2.config.js --update-env"
+        run_remote_command(command_restart)
+
+        command_ls = f"cd {remote_path} && pm2 ls"
+        run_remote_command(command_ls)
+        return 0
+
+    except paramiko.AuthenticationException:
+        print(
+            "\n[LỖI] SSH: máy chủ từ chối đăng nhập (sai user/mật hoặc chính sách server).\n"
+            f"  Đang thử: {username}@{remote_host}\n"
+            "  Việc nên làm:\n"
+            "  • Kiểm tra tay (cùng user/mật):  ssh "
+            + username
+            + "@"
+            + remote_host
+            + "\n"
+            "  • Máy api.toolhub.app **khác** máy serial: mật đúng trên serial **chưa chắc** đã được tạo giống trên api — nhờ quản trị/ thầy xác nhận tài khoản trên **máy này**.\n"
+            "  • Nếu dùng DEPLOY_PASSWORD: không thừa khoảng trắng; thử unset DEPLOY_PASSWORD rồi nhập mật khi script hỏi (ẩn).\n"
+            "  • Nếu server chỉ cho đăng nhập bằng **SSH key** (tắt mật khẩu), cần key — script hiện chỉ hỗ trợ mật khẩu."
+        )
+        return 1
+    except paramiko.ssh_exception.SSHException as e:
+        if "not found in known_hosts" in str(e):
+            print(
+                "\n[LỖI] Host key chưa được tin cậy.\n"
+                f"  Host: {remote_host}\n"
+                "  Cách xử lý an toàn:\n"
+                f"  • ssh-keyscan -H {remote_host} >> ~/.ssh/known_hosts\n"
+                "  • Hoặc khai báo known_hosts_file trong deploy-config.json.\n"
+                "  • Chỉ dùng allow_unknown_host=true cho môi trường thử nghiệm."
+            )
+            return 1
+        print(f"\nLỗi SSH: {e}")
+        return 1
+    except Exception as e:
+        print(f"\nĐã xảy ra lỗi: {e}")
+        return 1
+
+    finally:
+        if client:
+            client.close()
+            print("\nĐã đóng kết nối SSH.")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

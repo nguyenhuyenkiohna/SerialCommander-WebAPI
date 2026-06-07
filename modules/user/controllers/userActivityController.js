@@ -1,4 +1,5 @@
 const UserActivityService = require("../services/userActivityService");
+const { sendError, sendSuccess } = require("../../../kernels/middlewares/errorHandler");
 
 /**
  * Controller để xử lý các request liên quan đến User Activity
@@ -31,15 +32,11 @@ exports.getUserActivities = async (req, res) => {
       orderDirection
     });
 
-    res.json({
-      message: "Lấy lịch sử hoạt động thành công",
-      ...result
-    });
+    return sendSuccess(res, 200, "Lấy lịch sử hoạt động thành công", result);
   } catch (error) {
     console.error("Error in getUserActivities:", error);
-    res.status(500).json({
-      message: "Lỗi khi lấy lịch sử hoạt động",
-      error: error.message
+    return sendError(res, 500, "Lỗi khi lấy lịch sử hoạt động", "USER_ACTIVITY_FETCH_FAILED", {
+      detail: error.message,
     });
   }
 };
@@ -59,15 +56,11 @@ exports.getUserActivityStats = async (req, res) => {
       endDate || null
     );
 
-    res.json({
-      message: "Lấy thống kê hoạt động thành công",
-      stats
-    });
+    return sendSuccess(res, 200, "Lấy thống kê hoạt động thành công", { stats });
   } catch (error) {
     console.error("Error in getUserActivityStats:", error);
-    res.status(500).json({
-      message: "Lỗi khi lấy thống kê hoạt động",
-      error: error.message
+    return sendError(res, 500, "Lỗi khi lấy thống kê hoạt động", "USER_ACTIVITY_STATS_FAILED", {
+      detail: error.message,
     });
   }
 };
@@ -84,9 +77,7 @@ exports.createActivity = async (req, res) => {
     const userAgent = req.get('user-agent');
 
     if (!activityType) {
-      return res.status(400).json({
-        message: "activityType là bắt buộc"
-      });
+      return sendError(res, 400, "activityType là bắt buộc", "USER_ACTIVITY_TYPE_REQUIRED");
     }
 
     const activity = await UserActivityService.createActivity(
@@ -98,15 +89,11 @@ exports.createActivity = async (req, res) => {
       userAgent
     );
 
-    res.status(201).json({
-      message: "Tạo activity log thành công",
-      activity
-    });
+    return sendSuccess(res, 201, "Tạo activity log thành công", { activity });
   } catch (error) {
     console.error("Error in createActivity:", error);
-    res.status(500).json({
-      message: "Lỗi khi tạo activity log",
-      error: error.message
+    return sendError(res, 500, "Lỗi khi tạo activity log", "USER_ACTIVITY_CREATE_FAILED", {
+      detail: error.message,
     });
   }
 };

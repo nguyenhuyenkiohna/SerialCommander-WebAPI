@@ -1,0 +1,26 @@
+{
+  "username": "huyenntt",
+  "remote_host": "api.toolhub.app",
+  "remote_path": "/home/huyenntt/serialcommander_webapi",
+  "env_upload_local": ".env.production",
+  "env_remote_name": ".env",
+  "known_hosts_file": "~/.ssh/known_hosts",
+  "allow_unknown_host": false,
+  "comment": "Thay thế mẫu cũ dev@/home/dev/...: dùng huyenntt, api.toolhub.app, /home/huyenntt/serialcommander_webapi. Sao chép thành deploy-config.json (gitignore). Mật khẩu: DEPLOY_PASSWORD hoặc nhập khi chạy.",
+  "source_items": [
+    "configs",
+    "kernels",
+    "models",
+    "modules",
+    "routes",
+    "utils",
+    "migrations",
+    "scripts",
+    "server.js",
+    "package.json",
+    "package-lock.json",
+    "index.js",
+    "pm2.config.js",
+    ".env.production"
+  ]
+}

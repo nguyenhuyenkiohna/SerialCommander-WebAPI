@@ -1,6 +1,22 @@
 const express = require("express");
 const router = express.Router();
 const authController = require("modules/auth/authController");
+const { createSimpleRateLimit } = require("../kernels/middlewares/simpleRateLimit");
+const { validateAuth } = require("../kernels/validations");
+const {
+  registerValidators,
+  verifyEmailValidators,
+  resendVerificationValidators,
+  loginValidators,
+  forgotPasswordValidators,
+  verifyResetValidators,
+  resetPasswordValidators,
+} = require("../kernels/validations/authValidators");
+
+const authLoginRateLimit = createSimpleRateLimit({ windowMs: 60 * 1000, maxRequests: 10 });
+const authRegisterRateLimit = createSimpleRateLimit({ windowMs: 60 * 1000, maxRequests: 5 });
+const authOtpRateLimit = createSimpleRateLimit({ windowMs: 60 * 1000, maxRequests: 8 });
+const authResetRateLimit = createSimpleRateLimit({ windowMs: 60 * 1000, maxRequests: 6 });
 
 /**
  * @swagger
@@ -25,10 +41,18 @@ const authController = require("modules/auth/authController");
  *     responses:
  *       200:
  *         description: Đăng nhập thành công
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/LoginSuccessResponse'
  *       401:
  *         description: Sai tài khoản hoặc mật khẩu
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/login", authController.login);
+router.post("/login", authLoginRateLimit, validateAuth(loginValidators), authController.login);
 
 /**
  * @swagger
@@ -55,12 +79,76 @@ router.post("/login", authController.login);
  *     responses:
  *       201:
  *         description: Đăng ký thành công
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/RegisterSuccessResponse'
  *       400:
  *         description: Email hoặc username đã tồn tại
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/register", authController.register);
-router.post("/verify-email", authController.verifyEmail);
-router.post("/resend-verification-code", authController.resendVerificationCode);
+router.post("/register", authRegisterRateLimit, validateAuth(registerValidators), authController.register);
+
+/**
+ * @swagger
+ * /api/auth/verify-email:
+ *   post:
+ *     summary: Xác thực email bằng mã OTP
+ *     tags: [Authentication]
+ *     responses:
+ *       200:
+ *         description: Xác thực thành công hoặc đã xác thực trước đó
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageSuccessResponse'
+ *       400:
+ *         description: Mã không hợp lệ, hết hạn, hoặc input sai
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post("/verify-email", authOtpRateLimit, validateAuth(verifyEmailValidators), authController.verifyEmail);
+
+/**
+ * @swagger
+ * /api/auth/resend-verification-code:
+ *   post:
+ *     summary: Gửi lại mã xác thực email
+ *     tags: [Authentication]
+ *     responses:
+ *       200:
+ *         description: Gửi mã thành công
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageSuccessResponse'
+ *       400:
+ *         description: Input không hợp lệ
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post(
+  "/resend-verification-code",
+  authOtpRateLimit,
+  validateAuth(resendVerificationValidators),
+  authController.resendVerificationCode
+);
+
+/**
+ * @swagger
+ * /api/auth/google/status:
+ *   get:
+ *     summary: Trạng thái cấu hình Google OAuth
+ *     tags: [Authentication]
+ */
+router.get("/google/status", authController.googleOAuthStatus);
 
 /**
  * @swagger
@@ -106,8 +194,23 @@ router.get("/google/callback", authController.googleCallback);
  *     responses:
  *       200:
  *         description: Email đã được gửi (nếu email tồn tại)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageSuccessResponse'
+ *       400:
+ *         description: Input không hợp lệ hoặc tài khoản Google
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/forgot-password", authController.requestPasswordReset);
+router.post(
+  "/forgot-password",
+  authOtpRateLimit,
+  validateAuth(forgotPasswordValidators),
+  authController.requestPasswordReset
+);
 
 /**
  * @swagger
@@ -132,10 +235,23 @@ router.post("/forgot-password", authController.requestPasswordReset);
  *     responses:
  *       200:
  *         description: Mã hợp lệ
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/VerifyResetCodeSuccessResponse'
  *       400:
  *         description: Mã không hợp lệ hoặc đã hết hạn
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/verify-reset-code", authController.verifyResetCode);
+router.post(
+  "/verify-reset-code",
+  authOtpRateLimit,
+  validateAuth(verifyResetValidators),
+  authController.verifyResetCode
+);
 
 /**
  * @swagger
@@ -164,9 +280,22 @@ router.post("/verify-reset-code", authController.verifyResetCode);
  *     responses:
  *       200:
  *         description: Đặt lại mật khẩu thành công
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageSuccessResponse'
  *       400:
  *         description: Mã không hợp lệ hoặc mật khẩu không đủ dài
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/reset-password", authController.resetPassword);
+router.post(
+  "/reset-password",
+  authResetRateLimit,
+  validateAuth(resetPasswordValidators),
+  authController.resetPassword
+);
 
 module.exports = router;

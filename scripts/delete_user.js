@@ -1,90 +1,85 @@
-require("dotenv").config({ path: "./.env" });
+require("../configs/bootstrapEnv").loadEnvFiles();
 require("rootpath")();
-const { User, PasswordReset } = require("../models");
+const {
+  User,
+  PasswordReset,
+  EmailVerificationCode,
+  Scenario,
+  UserActivity,
+} = require("../models");
 
 async function deleteUser() {
-  try {
-    const identifier = process.argv[2]; // username, email, hoặc ID
-    
-    if (!identifier) {
-      console.log("❌ Vui lòng cung cấp username, email hoặc ID");
-      console.log("Usage: node scripts/delete_user.js <username|email|id>");
-      process.exit(1);
-    }
-    
-    console.log(`🔍 Đang tìm user: "${identifier}"...\n`);
-    
-    // Tìm user
-    let user;
-    if (!isNaN(identifier)) {
-      // Nếu là số, tìm theo ID
-      user = await User.findByPk(identifier);
-    } else if (identifier.includes("@")) {
-      // Nếu có @, tìm theo email
-      user = await User.findOne({ where: { email: identifier } });
-    } else {
-      // Tìm theo username
-      user = await User.findOne({ where: { username: identifier } });
-    }
-    
-    if (!user) {
-      console.log(`❌ Không tìm thấy user với: "${identifier}"`);
-      process.exit(1);
-    }
-    
-    // Hiển thị thông tin user trước khi xóa
-    console.log("📋 Thông tin user sẽ bị xóa:");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log(`ID:           ${user.id}`);
-    console.log(`Username:     ${user.username || "(null)"}`);
-    console.log(`Email:        ${user.email}`);
-    console.log(`Role:         ${user.role}`);
-    console.log(`Provider:     ${user.provider || "local"}`);
-    console.log(`Google ID:    ${user.googleId || "(null)"}`);
-    console.log(`Created At:   ${user.createdAt}`);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    
-    // Xác nhận
-    const readline = require("readline");
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    
-    rl.question("⚠️  Bạn có chắc chắn muốn xóa user này? (yes/no): ", async (answer) => {
-      if (answer.toLowerCase() !== "yes" && answer.toLowerCase() !== "y") {
-        console.log("❌ Đã hủy. User không bị xóa.");
-        rl.close();
-        process.exit(0);
-      }
-      
-      try {
-        // Xóa các password reset records liên quan
-        const deletedResets = await PasswordReset.destroy({ where: { email: user.email } });
-        console.log(`🗑️  Đã xóa ${deletedResets} password reset record(s)`);
-        
-        // Xóa user
-        await user.destroy();
-        
-        console.log("\n✅ Đã xóa user thành công!");
-        console.log(`   Username: ${user.username || "(null)"}`);
-        console.log(`   Email:    ${user.email}`);
-        
-        rl.close();
-        process.exit(0);
-      } catch (error) {
-        console.error("❌ Lỗi khi xóa user:", error.message);
-        rl.close();
-        process.exit(1);
-      }
-    });
-  } catch (error) {
-    console.error("❌ Lỗi:", error.message);
+  const args = process.argv.slice(2).filter((a) => a !== "--yes");
+  const autoYes = process.argv.includes("--yes");
+  const identifier = args[0];
+
+  if (!identifier) {
+    console.log("Usage: node scripts/delete_user.js <username|email|id> [--yes]");
     process.exit(1);
   }
+
+  console.log(`🔍 Đang tìm user: "${identifier}"...\n`);
+
+  let user;
+  if (!Number.isNaN(Number(identifier)) && String(Number(identifier)) === identifier) {
+    user = await User.findByPk(identifier);
+  } else if (identifier.includes("@")) {
+    user = await User.findOne({ where: { email: identifier } });
+  } else {
+    user = await User.findOne({ where: { username: identifier } });
+  }
+
+  if (!user) {
+    console.log(`❌ Không tìm thấy user: "${identifier}"`);
+    process.exit(1);
+  }
+
+  console.log("📋 User sẽ xóa:");
+  console.log(`   id=${user.id} username=${user.username || "(null)"} email=${user.email} provider=${user.provider || "local"}\n`);
+
+  const runDelete = async () => {
+    const uid = user.id;
+    const email = user.email;
+
+    const [resets, codes, scenarios, activities] = await Promise.all([
+      PasswordReset.destroy({ where: { UserId: uid } }),
+      EmailVerificationCode.destroy({ where: { UserId: uid } }),
+      Scenario.destroy({ where: { UserId: uid } }),
+      UserActivity.destroy({ where: { UserId: uid } }),
+    ]);
+    const resetsByEmail = await PasswordReset.destroy({ where: { email } });
+
+    await user.destroy();
+
+    console.log(`✅ Đã xóa user id=${uid} (${email})`);
+    console.log(`   PasswordReset: ${resets + resetsByEmail}, EmailVerificationCode: ${codes}, Scenario: ${scenarios}, UserActivity: ${activities}`);
+  };
+
+  if (autoYes) {
+    await runDelete();
+    process.exit(0);
+  }
+
+  const readline = require("readline");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.question("⚠️  Xóa user này? (yes/no): ", async (answer) => {
+    try {
+      if (answer.toLowerCase() !== "yes" && answer.toLowerCase() !== "y") {
+        console.log("❌ Đã hủy.");
+        process.exit(0);
+      }
+      await runDelete();
+      process.exit(0);
+    } catch (error) {
+      console.error("❌ Lỗi:", error.message);
+      process.exit(1);
+    } finally {
+      rl.close();
+    }
+  });
 }
 
-deleteUser();
-
-
-
+deleteUser().catch((e) => {
+  console.error("❌ Lỗi:", e.message);
+  process.exit(1);
+});

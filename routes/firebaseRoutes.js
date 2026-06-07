@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const { verifyToken } = require("../kernels/middlewares/authMiddleware");
+const { sendError } = require("../kernels/middlewares/errorHandler");
 const firebaseUpload = require("../kernels/middlewares/firebaseStorageUploadMiddleware");
 const firebaseStorageController = require("../modules/config/controllers/firebaseStorageController");
 
@@ -11,7 +12,7 @@ router.use(verifyToken);
 function uploadSingleWithMulterErrors(req, res, next) {
   firebaseUpload.single("file")(req, res, (err) => {
     if (err instanceof multer.MulterError) {
-      return res.status(400).json({ error: err.message });
+      return sendError(res, 400, err.message, "FIREBASE_UPLOAD_INVALID_FILE");
     }
     if (err) return next(err);
     return next();

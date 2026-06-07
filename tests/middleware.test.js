@@ -5,7 +5,8 @@
  */
 
 process.env.NODE_ENV = "test";
-process.env.JWT_SECRET = "test-secret-key";
+// ≥16 ký tự: khi test tạm NODE_ENV=production, getJwtSecret() bắt buộc secret đủ dài
+process.env.JWT_SECRET = "test-jwt-secret-for-jest-ok";
 process.env.FRONTEND_URL = "http://localhost:5173";
 process.env.FRONTEND_URLS = "http://localhost:5173,https://serial.toolhub.app";
 
@@ -16,6 +17,7 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const { verifyToken, verifyAdmin } = require("kernels/middlewares/authMiddleware");
+const { isDevPrivateNetworkOrigin } = require("kernels/loaders/securityLoader");
 
 // ─── Setup test app ──────────────────────────────────────────────────────────
 
@@ -23,7 +25,7 @@ function buildApp() {
   const app = express();
   app.use(express.json());
 
-  // CORS config (mirror cấu hình trong index.js)
+  // CORS config (mirror cấu hình trong securityLoader.js)
   app.use(
     cors({
       origin: (origin, cb) => {
@@ -38,15 +40,8 @@ function buildApp() {
           .filter(Boolean);
         const normalizedOrigin = origin.replace(/\/+$/, "");
         if (allowlist.includes(normalizedOrigin)) return cb(null, true);
-        if (process.env.NODE_ENV !== "production") {
-          if (
-            normalizedOrigin.startsWith("http://localhost:") ||
-            normalizedOrigin.startsWith("http://127.0.0.1:")
-          ) {
-            return cb(null, true);
-          }
-        }
-        return cb(new Error(`CORS: origin '${origin}' not allowed`));
+        if (isDevPrivateNetworkOrigin(normalizedOrigin)) return cb(null, true);
+        return cb(null, false);
       },
       credentials: true,
     })
@@ -199,6 +194,17 @@ describe("CORS configuration", () => {
 
     expect(res.headers["access-control-allow-origin"]).toBe(
       "http://localhost:3000"
+    );
+  });
+
+  test("✅ Cho phép LAN IP khi dev (vite --host 0.0.0.0)", async () => {
+    const res = await request(app)
+      .get("/protected")
+      .set("Origin", "http://192.168.5.175:5173")
+      .set("Authorization", "Bearer invalid");
+
+    expect(res.headers["access-control-allow-origin"]).toBe(
+      "http://192.168.5.175:5173"
     );
   });
 

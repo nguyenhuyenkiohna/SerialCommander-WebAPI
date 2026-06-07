@@ -10,6 +10,8 @@
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "test-secret-key";
 process.env.FRONTEND_URL = "http://localhost:5173";
+process.env.ALLOW_LEGACY_PLAINTEXT_OTP = "true";
+process.env.OTP_CODE_PEPPER = "test-otp-pepper-for-jest-ok";
 
 require("rootpath")();
 
@@ -25,11 +27,25 @@ jest.mock("models", () => {
     findOne: jest.fn(),
     create: jest.fn(),
     destroy: jest.fn(),
+    update: jest.fn().mockResolvedValue([1]),
+  };
+  const mockEmailVerificationCode = {
+    findOne: jest.fn(),
+    create: jest.fn(),
+    destroy: jest.fn(),
+    update: jest.fn(),
+  };
+  const mockPendingRegistration = {
+    findOne: jest.fn(),
+    create: jest.fn(),
+    destroy: jest.fn(),
     update: jest.fn(),
   };
   return {
     User: mockUser,
     PasswordReset: mockPasswordReset,
+    EmailVerificationCode: mockEmailVerificationCode,
+    PendingRegistration: mockPendingRegistration,
   };
 });
 
@@ -48,7 +64,7 @@ const request = require("supertest");
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { User, PasswordReset } = require("models");
+const { User, PasswordReset, EmailVerificationCode, PendingRegistration } = require("models");
 
 // Setup minimal express app for testing
 const authRoutes = require("routes/auth");
@@ -66,6 +82,11 @@ app.use("/api/auth", authRoutes);
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
 const makeHashedPassword = async (plainText) => bcrypt.hash(plainText, 10);
+const expectErrorContract = (res, code) => {
+  expect(res.body).toHaveProperty("error");
+  expect(res.body.error).toHaveProperty("code", code);
+  expect(typeof res.body.error.message).toBe("string");
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -74,10 +95,11 @@ beforeEach(() => {
 // ─── LOGIN TESTS ────────────────────────────────────────────────────────────
 
 describe("POST /api/auth/login", () => {
-  test("✅ Đăng nhập thành công với username/password đúng", async () => {
+  test("✅ Đăng nhập thành công với email/password đúng", async () => {
     const hashedPassword = await makeHashedPassword("correctpass");
     User.findOne.mockResolvedValue({
       id: 1,
+      email: "test@test.com",
       username: "testuser",
       password: hashedPassword,
       role: "user",
@@ -86,7 +108,7 @@ describe("POST /api/auth/login", () => {
     });
 
     const res = await request(app).post("/api/auth/login").send({
-      username: "testuser",
+      email: "test@test.com",
       password: "correctpass",
     });
 
@@ -110,19 +132,20 @@ describe("POST /api/auth/login", () => {
     });
 
     const res = await request(app).post("/api/auth/login").send({
-      username: "testuser",
+      email: "test@test.com",
       password: "wrongpass",
     });
 
     expect(res.status).toBe(401);
-    expect(res.body.message).toMatch(/Sai tài khoản hoặc mật khẩu/i);
+    expect(res.body.message).toMatch(/Sai email hoặc mật khẩu/i);
+    expectErrorContract(res, "AUTH_INVALID_CREDENTIALS");
   });
 
-  test("❌ Đăng nhập thất bại khi username không tồn tại", async () => {
+  test("❌ Đăng nhập thất bại khi email không tồn tại", async () => {
     User.findOne.mockResolvedValue(null);
 
     const res = await request(app).post("/api/auth/login").send({
-      username: "nonexistent",
+      email: "missing@test.com",
       password: "somepass",
     });
 
@@ -130,14 +153,15 @@ describe("POST /api/auth/login", () => {
     expect(res.body.message).toBeDefined();
   });
 
-  test("❌ Trả về 400 khi thiếu username hoặc password", async () => {
+  test("❌ Trả về 422 khi thiếu password", async () => {
     const res = await request(app).post("/api/auth/login").send({
-      username: "testuser",
+      email: "test@test.com",
       // password missing
     });
 
-    expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/bắt buộc/i);
+    expect(res.status).toBe(422);
+    expect(res.body.message).toMatch(/mật khẩu/i);
+    expectErrorContract(res, "VALIDATION_FAILED");
   });
 
   test("❌ Tài khoản Google không thể login bằng password", async () => {
@@ -149,7 +173,7 @@ describe("POST /api/auth/login", () => {
     });
 
     const res = await request(app).post("/api/auth/login").send({
-      username: "googleuser",
+      email: "google@test.com",
       password: "anypass",
     });
 
@@ -157,10 +181,11 @@ describe("POST /api/auth/login", () => {
     expect(res.body.message).toMatch(/Google/i);
   });
 
-  test("❌ Tài khoản local chưa xác thực email thì không thể login", async () => {
+  test("❌ Tài khoản local chưa xác thực email coi như không tồn tại", async () => {
     const hashedPassword = await makeHashedPassword("correctpass");
     User.findOne.mockResolvedValue({
       id: 3,
+      email: "pending@test.com",
       username: "needverify",
       password: hashedPassword,
       provider: "local",
@@ -168,35 +193,34 @@ describe("POST /api/auth/login", () => {
     });
 
     const res = await request(app).post("/api/auth/login").send({
-      username: "needverify",
+      email: "pending@test.com",
       password: "correctpass",
     });
 
-    expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/xác thực email/i);
+    expect(res.status).toBe(401);
+    expect(res.body.message).toMatch(/Sai email hoặc mật khẩu/i);
+    expectErrorContract(res, "AUTH_INVALID_CREDENTIALS");
   });
 });
 
 // ─── REGISTER TESTS ─────────────────────────────────────────────────────────
 
 describe("POST /api/auth/register", () => {
-  test("✅ Đăng ký thành công với đầy đủ thông tin", async () => {
-    User.findOne.mockResolvedValue(null); // Email chưa tồn tại
-    User.create.mockResolvedValue({
-      id: 3,
-      username: "newuser",
-      email: "new@test.com",
-      role: "user",
-    });
+  test("✅ Đăng ký chỉ tạo pending — chưa tạo User", async () => {
+    User.findOne.mockResolvedValue(null);
+    PendingRegistration.findOne.mockResolvedValue(null);
+    PendingRegistration.create.mockResolvedValue({ id: 1, email: "new@test.com" });
 
     const res = await request(app).post("/api/auth/register").send({
-      username: "newuser",
       email: "new@test.com",
       password: "password123",
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.message).toMatch(/thành công/i);
+    expect(res.body.message).toMatch(/mã xác thực/i);
+    expect(res.body).toMatchObject({ pendingOnly: true, requireEmailVerification: true });
+    expect(User.create).not.toHaveBeenCalled();
+    expect(PendingRegistration.create).toHaveBeenCalled();
   });
 
   test("❌ Đăng ký thất bại khi email đã tồn tại", async () => {
@@ -206,61 +230,54 @@ describe("POST /api/auth/register", () => {
     }); // Email đã tồn tại
 
     const res = await request(app).post("/api/auth/register").send({
-      username: "anotheruser",
       email: "existing@test.com",
       password: "password123",
     });
 
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/email/i);
+    expectErrorContract(res, "AUTH_EMAIL_EXISTS");
   });
 
   test("❌ Đăng ký thất bại khi thiếu email", async () => {
     const res = await request(app).post("/api/auth/register").send({
-      username: "newuser",
       password: "password123",
       // email missing
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
     expect(res.body.message).toMatch(/email/i);
+  });
+
+  test("❌ Đăng ký thất bại khi email không hợp lệ", async () => {
+    const res = await request(app).post("/api/auth/register").send({
+      email: "not-valid-email",
+      password: "password123",
+    });
+
+    expect(res.status).toBe(422);
+    expect(res.body.message).toBe("Email không hợp lệ");
   });
 
   test("❌ Đăng ký thất bại khi thiếu password", async () => {
     const res = await request(app).post("/api/auth/register").send({
-      username: "newuser",
       email: "test@test.com",
       // password missing
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
     expect(res.body.message).toMatch(/mật khẩu/i);
   });
 
-  test("❌ Đăng ký thất bại khi username đã tồn tại", async () => {
-    User.findOne
-      .mockResolvedValueOnce(null) // email chưa tồn tại
-      .mockResolvedValueOnce({ id: 1, username: "existinguser" }); // username đã có
-
-    const res = await request(app).post("/api/auth/register").send({
-      username: "existinguser",
-      email: "brand@new.com",
-      password: "password123",
-    });
-
-    expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/tên đăng nhập/i);
-  });
-
-  test("❌ Xử lý đúng lỗi SequelizeUniqueConstraintError từ DB", async () => {
+  test("❌ Xử lý đúng lỗi SequelizeUniqueConstraintError từ DB (pending email)", async () => {
     User.findOne.mockResolvedValue(null);
+    PendingRegistration.findOne.mockResolvedValue(null);
     const duplicateError = new Error("ER_DUP_ENTRY");
     duplicateError.name = "SequelizeUniqueConstraintError";
     duplicateError.fields = { email: "email" };
-    User.create.mockRejectedValue(duplicateError);
+    PendingRegistration.create.mockRejectedValue(duplicateError);
 
     const res = await request(app).post("/api/auth/register").send({
-      username: "user99",
       email: "dup@test.com",
       password: "password123",
     });
@@ -273,7 +290,7 @@ describe("POST /api/auth/register", () => {
 // ─── FORGOT PASSWORD TESTS ──────────────────────────────────────────────────
 
 describe("POST /api/auth/forgot-password", () => {
-  test("❌ Trả về 404 khi email không tồn tại", async () => {
+  test("❌ Email không tồn tại trong hệ thống", async () => {
     User.findOne.mockResolvedValue(null);
 
     const res = await request(app).post("/api/auth/forgot-password").send({
@@ -281,7 +298,8 @@ describe("POST /api/auth/forgot-password", () => {
     });
 
     expect(res.status).toBe(404);
-    expect(res.body.message).toMatch(/chưa được đăng ký/i);
+    expect(res.body.message).toMatch(/không tồn tại/i);
+    expectErrorContract(res, "AUTH_EMAIL_NOT_FOUND");
   });
 
   test("✅ Gửi email thành công khi email hợp lệ", async () => {
@@ -304,22 +322,23 @@ describe("POST /api/auth/forgot-password", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(res.body.message).toMatch(/nếu email tồn tại/i);
+    expect(res.body.message).toBe("OK");
   });
 
-  test("❌ Trả về 400 khi thiếu email", async () => {
+  test("❌ Trả về 422 khi thiếu email", async () => {
     const res = await request(app).post("/api/auth/forgot-password").send({});
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
     expect(res.body.message).toMatch(/email/i);
   });
 
-  test("❌ Tài khoản Google không thể reset password", async () => {
+  test("❌ Tài khoản Google không dùng quên mật khẩu local", async () => {
     User.findOne.mockResolvedValue({
       id: 2,
       email: "google@test.com",
       provider: "google",
       password: null,
+      isVerified: true,
     });
 
     const res = await request(app).post("/api/auth/forgot-password").send({
@@ -328,6 +347,7 @@ describe("POST /api/auth/forgot-password", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/Google/i);
+    expectErrorContract(res, "AUTH_GOOGLE_ACCOUNT");
   });
 });
 
@@ -335,13 +355,15 @@ describe("POST /api/auth/forgot-password", () => {
 
 describe("POST /api/auth/verify-reset-code", () => {
   test("✅ Mã reset hợp lệ", async () => {
-    User.findOne.mockResolvedValue({ id: 1, email: "user@test.com" });
-    PasswordReset.findOne.mockResolvedValue({
-      id: 1,
-      resetCode: "123456",
-      used: false,
-      expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 phút nữa
-    });
+    User.findOne.mockResolvedValue({ id: 1, email: "user@test.com", isVerified: true });
+    PasswordReset.findOne
+      .mockResolvedValueOnce({
+        id: 1,
+        resetCode: "123456",
+        used: false,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 phút nữa
+      })
+      .mockResolvedValueOnce(null);
 
     const res = await request(app).post("/api/auth/verify-reset-code").send({
       email: "user@test.com",
@@ -353,13 +375,15 @@ describe("POST /api/auth/verify-reset-code", () => {
   });
 
   test("❌ Mã reset đã hết hạn", async () => {
-    User.findOne.mockResolvedValue({ id: 1, email: "user@test.com" });
-    PasswordReset.findOne.mockResolvedValue({
-      id: 1,
-      resetCode: "123456",
-      used: false,
-      expiresAt: new Date(Date.now() - 1000), // đã hết hạn
-    });
+    User.findOne.mockResolvedValue({ id: 1, email: "user@test.com", isVerified: true });
+    PasswordReset.findOne
+      .mockResolvedValueOnce({
+        id: 1,
+        resetCode: "123456",
+        used: false,
+        expiresAt: new Date(Date.now() - 1000),
+      })
+      .mockResolvedValueOnce(null);
 
     const res = await request(app).post("/api/auth/verify-reset-code").send({
       email: "user@test.com",
@@ -371,7 +395,7 @@ describe("POST /api/auth/verify-reset-code", () => {
   });
 
   test("❌ Mã reset không đúng", async () => {
-    User.findOne.mockResolvedValue({ id: 1, email: "user@test.com" });
+    User.findOne.mockResolvedValue({ id: 1, email: "user@test.com", isVerified: true });
     PasswordReset.findOne.mockResolvedValue(null);
 
     const res = await request(app).post("/api/auth/verify-reset-code").send({
@@ -381,6 +405,7 @@ describe("POST /api/auth/verify-reset-code", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/không hợp lệ/i);
+    expectErrorContract(res, "AUTH_RESET_CODE_INVALID");
   });
 });
 
@@ -391,6 +416,7 @@ describe("POST /api/auth/reset-password", () => {
     const mockUser = {
       id: 1,
       email: "user@test.com",
+      isVerified: true,
       update: jest.fn().mockResolvedValue(true),
     };
     const mockResetRecord = {
@@ -402,7 +428,9 @@ describe("POST /api/auth/reset-password", () => {
     };
 
     User.findOne.mockResolvedValue(mockUser);
-    PasswordReset.findOne.mockResolvedValue(mockResetRecord);
+    PasswordReset.findOne
+      .mockResolvedValueOnce(mockResetRecord)
+      .mockResolvedValueOnce(null);
     PasswordReset.destroy.mockResolvedValue(1);
 
     const res = await request(app).post("/api/auth/reset-password").send({
@@ -416,7 +444,7 @@ describe("POST /api/auth/reset-password", () => {
     expect(mockUser.update).toHaveBeenCalledWith(
       expect.objectContaining({ password: expect.any(String) })
     );
-    expect(mockResetRecord.update).toHaveBeenCalledWith({ used: true });
+    expect(PasswordReset.update).toHaveBeenCalled();
   });
 
   test("❌ Mật khẩu mới quá ngắn (< 6 ký tự)", async () => {
@@ -426,7 +454,7 @@ describe("POST /api/auth/reset-password", () => {
       newPassword: "abc",
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
     expect(res.body.message).toMatch(/6 ký tự/i);
   });
 
@@ -436,7 +464,7 @@ describe("POST /api/auth/reset-password", () => {
       // code và newPassword missing
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
     expect(res.body.message).toBeDefined();
   });
 });
@@ -444,25 +472,26 @@ describe("POST /api/auth/reset-password", () => {
 // ─── VERIFY EMAIL TESTS ─────────────────────────────────────────────────────
 
 describe("POST /api/auth/verify-email", () => {
-  test("✅ Xác thực email thành công", async () => {
-    const mockUser = {
-      id: 10,
+  test("✅ Xác thực email thành công (tạo User từ pending)", async () => {
+    const pendingRow = {
       email: "verify@test.com",
-      provider: "local",
-      isVerified: false,
-      update: jest.fn().mockResolvedValue(true),
-    };
-    const verifyRecord = {
-      id: 1,
-      resetCode: "123456",
-      used: false,
+      password: "hashed-pass",
+      verifyCode: "123456",
       expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      update: jest.fn().mockResolvedValue(true),
+      destroy: jest.fn().mockResolvedValue(true),
     };
 
-    User.findOne.mockResolvedValue(mockUser);
-    PasswordReset.findOne.mockResolvedValue(verifyRecord);
-    PasswordReset.destroy.mockResolvedValue(1);
+    User.findOne.mockImplementation(async ({ where }) => {
+      if (where?.isVerified === true) return null;
+      if (where?.username) return null;
+      return null;
+    });
+    PendingRegistration.findOne.mockResolvedValue(pendingRow);
+    User.create.mockResolvedValue({
+      id: 11,
+      email: "verify@test.com",
+      isVerified: true,
+    });
 
     const res = await request(app).post("/api/auth/verify-email").send({
       email: "verify@test.com",
@@ -470,18 +499,18 @@ describe("POST /api/auth/verify-email", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(res.body.message).toMatch(/thành công/i);
-    expect(mockUser.update).toHaveBeenCalledWith({ isVerified: true });
+    expect(res.body.message).toBe("OK");
+    expect(res.body.verified).toBe(true);
+    expect(User.create).toHaveBeenCalled();
+    expect(pendingRow.destroy).toHaveBeenCalled();
   });
 
   test("❌ Mã xác thực email sai hoặc đã dùng", async () => {
-    User.findOne.mockResolvedValue({
-      id: 10,
-      email: "verify@test.com",
-      provider: "local",
-      isVerified: false,
+    User.findOne.mockImplementation(async ({ where }) => {
+      if (where?.isVerified === true) return null;
+      return null;
     });
-    PasswordReset.findOne.mockResolvedValue(null);
+    PendingRegistration.findOne.mockResolvedValue(null);
 
     const res = await request(app).post("/api/auth/verify-email").send({
       email: "verify@test.com",

@@ -1,5 +1,26 @@
 const scenarioService = require("../services/scenarioService");
 const { validateScenarioFile } = require("../services/scenarioFileValidator");
+const { logError, logWarn } = require("../../../kernels/logging/appLogger");
+const {
+  scenarioMergedResourceSuccessSchema,
+  scenarioListEnvelopeSchema,
+} = require("../../../kernels/validations/responseSchemas");
+const { sendError, sendSuccess } = require("../../../kernels/middlewares/errorHandler");
+const {
+  mapScenarioOutput,
+  mapScenarioFromMaybeDataValues,
+  mapScenarioForExport,
+} = require("../services/scenarioPresenter");
+
+function respondScenarioError(res, error, fallbackCode) {
+  const meta = { message: error.message, fallbackCode };
+  if (error.statusCode === 404) {
+    logWarn("scenario route not found", meta);
+  } else {
+    logError("scenario route error", { ...meta, stack: error.stack });
+  }
+  return sendError(res, error.statusCode || 500, error.message, error.code || fallbackCode);
+}
 
 /**
  * Creates a new scenario for the authenticated user.
@@ -9,10 +30,12 @@ exports.createScenario = async (req, res) => {
   const userId = req.user.id;
   try {
     const newScenario = await scenarioService.createScenario(userId, req.body);
-    res.status(201).json({ message: "Tạo kịch bản thành công.", scenario: newScenario });
+    return sendSuccess(res, 202, "Đã chấp nhận tạo kịch bản — đang đồng bộ nội dung lên Firestore.", {
+      scenario: newScenario,
+      syncStatus: "pending",
+    });
   } catch (error) {
-    console.error("Lỗi khi tạo kịch bản:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_CREATE_FAILED");
   }
 };
 
@@ -23,7 +46,7 @@ exports.createScenario = async (req, res) => {
  */
 exports.verifyScenario = (req, res) => {
   const messages = scenarioService.verifyScenario(req.body);
-  res.status(200).json(messages);
+  return sendSuccess(res, 200, "Kiểm tra kịch bản thành công", messages);
 };
 
 /**
@@ -34,7 +57,7 @@ exports.verifyScenario = (req, res) => {
 exports.verifyScenarioFile = (req, res) => {
   const raw = typeof req.body === "string" ? req.body : (req.body && req.body.content);
   const result = validateScenarioFile(raw);
-  res.status(200).json(result);
+  return sendSuccess(res, 200, "Kiểm tra file kịch bản thành công", result);
 };
 
 /**
@@ -46,10 +69,12 @@ exports.updateScenario = async (req, res) => {
   const userId = req.user.id;
   try {
     await scenarioService.updateScenario(scenarioId, userId, req.body);
-    res.status(200).json({ message: "Cập nhật kịch bản thành công." });
+    return sendSuccess(res, 202, "Đã chấp nhận cập nhật — đang đồng bộ nội dung lên Firestore.", {
+      scenarioId,
+      syncStatus: "pending",
+    });
   } catch (error) {
-    console.error("Lỗi khi cập nhật kịch bản:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_UPDATE_FAILED");
   }
 };
 
@@ -61,31 +86,57 @@ exports.deleteScenario = async (req, res) => {
   const userId = req.user.id;
   try {
     await scenarioService.deleteScenario(scenarioId, userId);
-    res.status(200).json({ message: "Xóa kịch bản thành công." });
+    return sendSuccess(res, 202, "Đã chấp nhận xóa — đang đồng bộ xóa trên Firestore.", {
+      scenarioId,
+      syncStatus: "pending",
+    });
   } catch (error) {
-    console.error("Lỗi khi xóa kịch bản:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_DELETE_FAILED");
   }
 };
 
-/** Lấy chỉ lấy nội dung của kịch bản (không có thông tin quản lý)
- * và lưu về dạng file
- * @see getScenarioById()  Trả về toàn bộ kịch bản và thông tin quản lý
- * @see exportScenarioById  Trả về nội dung kịch bản và thông tin quản lý, ở dạng file
- * @see getScenarioByShareCode Trả về nội dung kịch bản, không có thông tin quản lý, ở dạng json
+/**
+ * Public: kiểm tra mã chia sẻ có thể mở (không trả nội dung kịch bản).
+ * @alias /share/:shareCode/availability
+ */
+exports.getShareAvailability = async (req, res) => {
+  const { shareCode } = req.params;
+  try {
+    const available = await scenarioService.isShareCodeAvailable(shareCode);
+    if (!available) {
+      return sendError(
+        res,
+        404,
+        "Mã chia sẻ không tồn tại hoặc chưa được bật chia sẻ.",
+        "SHARE_CODE_NOT_AVAILABLE"
+      );
+    }
+    return sendSuccess(res, 200, "Mã chia sẻ có thể truy cập.", {
+      available: true,
+      shareCode,
+    });
+  } catch (error) {
+    respondScenarioError(res, error, "SHARE_AVAILABILITY_FAILED");
+  }
+};
+
+/**
+ * Public: kịch bản theo mã chia sẻ. Field kịch bản + `message` / `trace_id` cùng cấp root (sendSuccess merge DTO).
  * @alias /share/:shareCode
  */
 exports.getScenarioByShareCode = async (req, res) => {
   const { shareCode } = req.params;
   try {
     const raw = await scenarioService.getScenarioByShareCode(shareCode);
-    const record = raw.dataValues ?? raw;
-    const banners = [record.Banner1, record.Banner2].filter(Boolean);
-    const { Banner1, Banner2, ...rest } = record;
-    res.status(200).json({ ...rest, Banners: banners });
+    return sendSuccess(
+      res,
+      200,
+      "Lấy kịch bản chia sẻ thành công.",
+      mapScenarioFromMaybeDataValues(raw),
+      scenarioMergedResourceSuccessSchema
+    );
   } catch (error) {
-    console.error("Lỗi khi lấy kịch bản chia sẻ:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_SHARE_FETCH_FAILED");
   }
 };
 
@@ -100,14 +151,15 @@ exports.getScenarioById = async (req, res) => {
   const userId = req.user.id;
   try {
     const record = await scenarioService.getScenarioById(scenarioId, userId);
-    const banners = [record.Banner1, record.Banner2].filter(Boolean);
-    const { Banner1, Banner2, ...rest } = record;
-    res.status(200).json({ ...rest, Banners: banners });
+    return sendSuccess(
+      res,
+      200,
+      "Lấy kịch bản thành công.",
+      mapScenarioOutput(record),
+      scenarioMergedResourceSuccessSchema
+    );
   } catch (error) {
-    if (error.statusCode !== 404) {
-      console.error("Lỗi khi lấy kịch bản:", error);
-    }
-    res.status(error.statusCode || 500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_GET_FAILED");
   }
 };
 
@@ -122,21 +174,11 @@ exports.exportScenarioById = async (req, res) => {
   const userId = req.user.id;
   try {
     const record = await scenarioService.getScenarioById(scenarioId, userId);
-    let parsedContent;
-    try {
-      parsedContent = JSON.parse(record.Content);
-    } catch {
-      parsedContent = [];
-    }
-    // Chuyển Banner1/Banner2 sang mảng Banners để đồng nhất với file format
-    const banners = [record.Banner1, record.Banner2].filter(Boolean);
-    const { Banner1, Banner2, ...rest } = record;
-    const scenario = { ...rest, Banners: banners, Content: parsedContent };
+    const scenario = mapScenarioForExport(record);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(record.Name + ".json")}`);
-    res.status(200).json(scenario);
+    return sendSuccess(res, 200, "Xuất file kịch bản thành công.", scenario, scenarioMergedResourceSuccessSchema);
   } catch (error) {
-    console.error("Lỗi khi xuất kịch bản:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_EXPORT_FAILED");
   }
 };
 
@@ -147,10 +189,13 @@ exports.getScenariosByUserId = async (req, res) => {
   const userId = req.user.id;
   try {
     const scenarios = await scenarioService.getScenariosByUserId(userId);
-    res.status(200).json(scenarios);
+    /** Tương thích client cũ: mảng JSON thuần ở root (không có envelope). */
+    if (req.query.legacy_array === "1") {
+      return res.status(200).json(scenarios);
+    }
+    return sendSuccess(res, 200, "Lấy danh sách kịch bản thành công.", { scenarios }, scenarioListEnvelopeSchema);
   } catch (error) {
-    console.error("Lỗi khi lấy danh sách kịch bản:", error);
-    res.status(500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_LIST_FAILED");
   }
 };
 
@@ -163,19 +208,17 @@ exports.shareScenarioById = async (req, res) => {
   try {
     const scenario = await scenarioService.shareScenario(scenarioId, userId);
     if (scenario.IsShared) {
-      res.status(200).json({
+      return sendSuccess(res, 200, "Chia sẻ kịch bản thành công.", {
         message: "Chia sẻ kịch bản thành công.",
         ShareCode: scenario.ShareCode,
         IsShared: scenario.IsShared,
       });
-    } else {
-      res.status(200).json({
-        message: "Đã ngừng chia sẻ để sử dụng cá nhân.",
-        IsShared: scenario.IsShared,
-      });
     }
+    return sendSuccess(res, 200, "Đã ngừng chia sẻ để sử dụng cá nhân.", {
+      message: "Đã ngừng chia sẻ để sử dụng cá nhân.",
+      IsShared: scenario.IsShared,
+    });
   } catch (error) {
-    console.error("Lỗi khi chia sẻ kịch bản:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    respondScenarioError(res, error, "SCENARIO_TOGGLE_SHARE_FAILED");
   }
 };

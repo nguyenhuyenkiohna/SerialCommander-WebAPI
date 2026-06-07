@@ -1,6 +1,9 @@
-const { Scenario } = require("../../../models");
+const { Scenario, sequelize } = require("../../../models");
 const { v4: uuidv4 } = require("uuid");
+const { logWarn, logError } = require("../../../kernels/logging/appLogger");
 const scenarioFirestore = require("./scenarioFirestoreService");
+const scenarioSyncQueue = require("../../../kernels/scenarioSyncQueue");
+const scenarioSyncJobService = require("./scenarioSyncJobService");
 
 function toPlainRecord(record) {
   if (!record) return null;
@@ -9,16 +12,86 @@ function toPlainRecord(record) {
 
 function contentInputToArray(content) {
   if (Array.isArray(content)) return content;
-  if (content == null || content === "") return [];
+  if (content == null || content === "") return null;
   if (typeof content === "string") {
     try {
       const parsed = JSON.parse(content);
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed) ? parsed : null;
     } catch {
-      return [];
+      return null;
     }
   }
-  return [];
+  return null;
+}
+
+function sanitizeString(value, fallback = "") {
+  if (typeof value !== "string") return fallback;
+  return value.trim();
+}
+
+function normalizeScenarioPayload(scenarioData) {
+  const errors = [];
+  const name = sanitizeString(scenarioData?.Name);
+  if (!name) {
+    errors.push('Trường "Name" là bắt buộc.');
+  }
+
+  const contentArr = contentInputToArray(scenarioData?.Content);
+  if (!contentArr) {
+    errors.push('Trường "Content" phải là JSON array hợp lệ.');
+  }
+
+  const parity = scenarioData?.Parity == null ? "none" : String(scenarioData.Parity).toLowerCase();
+  if (!["none", "even", "odd", "mark", "space"].includes(parity)) {
+    errors.push('Trường "Parity" không hợp lệ.');
+  }
+
+  const stopBits = scenarioData?.StopBits == null ? 1 : Number(scenarioData.StopBits);
+  if (![1, 2].includes(stopBits)) {
+    errors.push('Trường "StopBits" chỉ chấp nhận 1 hoặc 2.');
+  }
+
+  const dataBits = scenarioData?.DataBits == null ? 8 : Number(scenarioData.DataBits);
+  if (![7, 8].includes(dataBits)) {
+    errors.push('Trường "DataBits" chỉ chấp nhận 7 hoặc 8.');
+  }
+
+  const flowControl = scenarioData?.FlowControl == null ? "none" : String(scenarioData.FlowControl).toLowerCase();
+  if (!["none", "hardware"].includes(flowControl)) {
+    errors.push('Trường "FlowControl" chỉ chấp nhận "none" hoặc "hardware".');
+  }
+
+  const newLineRaw = scenarioData?.NewLine == null ? "none" : String(scenarioData.NewLine);
+  const newLineNormalized = newLineRaw.toUpperCase() === "NONE" ? "none" : newLineRaw.toUpperCase();
+  if (!["none", "CRLF", "CR", "LF"].includes(newLineNormalized)) {
+    errors.push('Trường "NewLine" chỉ chấp nhận "none", "CRLF", "CR" hoặc "LF".');
+  }
+
+  const baudrate = scenarioData?.Baudrate == null ? null : Number(scenarioData.Baudrate);
+  if (baudrate != null && (!Number.isInteger(baudrate) || baudrate <= 0)) {
+    errors.push('Trường "Baudrate" phải là số nguyên dương.');
+  }
+
+  if (errors.length > 0) {
+    const error = new Error(errors.join(" "));
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    Name: name,
+    Description: sanitizeString(scenarioData?.Description, ""),
+    Baudrate: baudrate,
+    Parity: parity,
+    StopBits: stopBits,
+    DataBits: dataBits,
+    FlowControl: flowControl,
+    NewLine: newLineNormalized,
+    Banners: Array.isArray(scenarioData?.Banners) ? scenarioData.Banners : [],
+    Banner1: scenarioData?.Banner1 ?? null,
+    Banner2: scenarioData?.Banner2 ?? null,
+    Content: contentArr,
+  };
 }
 
 /**
@@ -37,102 +110,53 @@ async function attachScenarioContent(record) {
 }
 
 /**
- * Verifies if the scenario data is valid and conforms to the Scenario model's requirements.
- * This function performs basic validation on the received data and collects all errors and warnings.
+ * Verifies if the scenario data is valid — dùng cùng normalizeScenarioPayload để đảm bảo
+ * contract nhất quán giữa /verify (public) và createScenario/updateScenario.
+ *
  * @param {object} scenarioData - The scenario data to validate.
- * @returns {object} An object containing the validated data, a list of errors, and a list of warnings.
+ * @returns {object} { data, errors, warnings }
  */
 exports.verifyScenario = (scenarioData) => {
-  const errors = [];
   const warnings = [];
 
-  // --- 1. Kiểm tra sự tồn tại của dữ liệu và kiểu dữ liệu
-  if (!scenarioData || typeof scenarioData !== 'object') {
-    errors.push('Dữ liệu kịch bản không hợp lệ hoặc bị thiếu.');
-    return { data: null, errors, warnings };
+  if (!scenarioData || typeof scenarioData !== "object") {
+    return { data: null, errors: ["Dữ liệu kịch bản không hợp lệ hoặc bị thiếu."], warnings };
   }
 
-  // --- 2. Kiểm tra các trường bắt buộc và kiểu dữ liệu
-  if (!scenarioData.Name || typeof scenarioData.Name !== 'string' || scenarioData.Name.trim() === '') {
-    errors.push('Trường "Name" không hợp lệ hoặc bị thiếu.');
-  }
-
-  // --- 2. Kiểm tra các trường bắt buộc và kiểu dữ liệu
-  if (!scenarioData.Description || typeof scenarioData.Description !== 'string' || scenarioData.Description.trim() === '') {
+  // Gợi ý không bắt buộc
+  if (!scenarioData.Description || String(scenarioData.Description).trim() === "") {
     warnings.push('Trường "Description" giúp giải thích rõ hơn về kịch bản.');
   }
 
-// --- 3. Kiểm tra trường Content (là chuỗi JSON)
-  if (!scenarioData.Content) {
-    warnings.push('Trường "Content" thiếu hoặc không phải là mảng Json.');
-  } else if (scenarioData.Content) {
+  // Kiểm tra cấu trúc Content items nếu có
+  const rawContent = scenarioData.Content;
+  if (rawContent) {
     try {
-      const parsedContent = JSON.parse(scenarioData.Content);
-      if (!Array.isArray(parsedContent)) {
-        errors.push('Trường "Content" phải là một chuỗi JSON đại diện cho một mảng.');
-      } else {
-        // Kiểm tra cấu trúc của từng phần tử trong mảng Content
-        parsedContent.forEach((item, index) => {
-          if (typeof item !== 'object' || item === null) {
-            errors.push(`Phần tử Content[${index}] không phải là một đối tượng.`);
-          } else {
-            if (typeof item.Name !== 'string' || item.Name.trim() === '') {
-              errors.push(`Trường Name của Content[${index}] không hợp lệ.`);
-            }
-            if (typeof item.Type !== 'string' || item.Type.trim() === '') {
-              errors.push(`Trường Type của Content[${index}] không hợp lệ.`);
-            }
-            // Các trường List và DefaultValue có thể là null hoặc chuỗi
-            if (item.List !== null && typeof item.List !== 'string') {
-                warnings.push(`Trường List của Content[${index}] nên là kiểu chuỗi hoặc null.`);
-            }
-            if (item.DefaultValue !== null && typeof item.DefaultValue !== 'string') {
-                warnings.push(`Trường DefaultValue của Content[${index}] nên là kiểu chuỗi hoặc null.`);
-            }
+      const arr = Array.isArray(rawContent) ? rawContent : JSON.parse(rawContent);
+      if (Array.isArray(arr)) {
+        arr.forEach((item, index) => {
+          if (typeof item !== "object" || item === null) return;
+          if (item.List !== null && item.List !== undefined && typeof item.List !== "string") {
+            warnings.push(`Trường List của Content[${index}] nên là chuỗi hoặc null.`);
+          }
+          if (item.DefaultValue !== null && item.DefaultValue !== undefined && typeof item.DefaultValue !== "string") {
+            warnings.push(`Trường DefaultValue của Content[${index}] nên là chuỗi hoặc null.`);
           }
         });
       }
-    } catch (e) {
-      errors.push('Trường "Content" không phải là một chuỗi JSON hợp lệ.');
+    } catch {
+      // Lỗi parse sẽ được báo bởi normalizeScenarioPayload bên dưới
     }
   }
 
-  // --- 4. Kiểm tra các trường tùy chọn khác (dựa trên DeviceConfig và Scenario model)
-  if (scenarioData.Baudrate && typeof scenarioData.Baudrate !== 'number') {
-    warnings.push('Trường "Baudrate" nên là kiểu số.');
+  // Dùng cùng logic validate/normalize với createScenario để đảm bảo nhất quán
+  try {
+    const normalized = normalizeScenarioPayload(scenarioData);
+    return { data: normalized, errors: [], warnings };
+  } catch (err) {
+    const messages = err.message ? err.message.split(" ").filter(Boolean) : [String(err)];
+    return { data: null, errors: [err.message || String(err)], warnings };
   }
-
-  const validParities = ['none', 'even', 'odd', 'mark', 'space'];
-  if (scenarioData.Parity && !validParities.includes(scenarioData.Parity.toLowerCase())) {
-    warnings.push(`Trường "Parity" không hợp lệ. Các giá trị hợp lệ là: ${validParities.join(', ')}.`);
-  }
-
-  const validStopBits = [1, 1.5, 2];
-  if (scenarioData.StopBits && !validStopBits.includes(scenarioData.StopBits)) {
-    warnings.push(`Trường "StopBits" không hợp lệ. Các giá trị hợp lệ là: ${validStopBits.join(', ')}.`);
-  }
-
-  if (scenarioData.DataBits && (typeof scenarioData.DataBits !== 'number'
-    || (scenarioData.DataBits !== 7 && scenarioData.DataBits !== 8))) {
-    warnings.push('Trường "DataBits" nên là kiểu số, với giá trị 7 hoặc 8.');
-  }
-
-  if (scenarioData.NewLine && typeof scenarioData.NewLine !== 'string') {
-    warnings.push('Trường "NewLine" nên là kiểu chuỗi.');
-  }
-
-  if (scenarioData.Banner1 && typeof scenarioData.Banner1 !== 'string') {
-    warnings.push('Trường "Banner1" nên là kiểu chuỗi.');
-  }
-
-  if (scenarioData.Banner2 && typeof scenarioData.Banner2 !== 'string') {
-    warnings.push('Trường "Banner2" nên là kiểu chuỗi.');
-  }
-
-  // --- 5. Trả về kết quả
-  // Nếu có lỗi, trả về null cho data để biểu thị việc xác thực thất bại
-  const data = errors.length > 0 ? null : scenarioData;
-  return { data, errors, warnings };
 };
 
 
@@ -143,35 +167,50 @@ exports.verifyScenario = (scenarioData) => {
  * @returns {Promise<object>} A promise that resolves to the created scenario object.
  */
 exports.createScenario = async (userId, scenarioData) => {
-  const contentArr = contentInputToArray(scenarioData.Content);
-  const banners = Array.isArray(scenarioData.Banners) ? scenarioData.Banners : [];
+  const normalized = normalizeScenarioPayload(scenarioData);
+  const banners = normalized.Banners;
+  const tx = await sequelize.transaction();
   let newScenario;
   try {
-    newScenario = await Scenario.create({
-      Name: scenarioData.Name,
-      Description: scenarioData.Description,
-      UserId: userId,
-      Baudrate: scenarioData.Baudrate,
-      Parity: scenarioData.Parity,
-      StopBits: scenarioData.StopBits,
-      DataBits: scenarioData.DataBits,
-      FlowControl: scenarioData.FlowControl,
-      NewLine: scenarioData.NewLine,
-      Banner1: banners[0] ?? scenarioData.Banner1 ?? null,
-      Banner2: banners[1] ?? scenarioData.Banner2 ?? null,
-      Content: null,
-    });
+    newScenario = await Scenario.create(
+      {
+        Name: normalized.Name,
+        Description: normalized.Description,
+        UserId: userId,
+        Baudrate: normalized.Baudrate,
+        Parity: normalized.Parity,
+        StopBits: normalized.StopBits,
+        DataBits: normalized.DataBits,
+        FlowControl: normalized.FlowControl,
+        NewLine: normalized.NewLine,
+        Banner1: banners[0] ?? normalized.Banner1 ?? null,
+        Banner2: banners[1] ?? normalized.Banner2 ?? null,
+        Content: JSON.stringify(normalized.Content),
+      },
+      { transaction: tx }
+    );
+    await scenarioSyncJobService.enqueue(
+      "scenario_upsert",
+      newScenario.Id,
+      { content: normalized.Content },
+      null,
+      { transaction: tx }
+    );
+    await tx.commit();
   } catch (error) {
-    throw new Error("Failed to create scenario: " + error.message);
+    await tx.rollback();
+    logError("createScenario failed", {
+      userId,
+      message: error.message || String(error),
+      code: error.code,
+      statusCode: error.statusCode || error.status,
+    });
+    throw error;
   }
-  try {
-    await scenarioFirestore.saveScenarioContent(newScenario.Id, contentArr);
-  } catch (e) {
-    await Scenario.destroy({ where: { Id: newScenario.Id } });
-    throw e;
-  }
+
   const plain = toPlainRecord(newScenario);
-  plain.Content = JSON.stringify(contentArr);
+  plain.Content = JSON.stringify(normalized.Content);
+  plain.syncStatus = "pending";
   return plain;
 };
 
@@ -201,31 +240,50 @@ exports.getScenarioById = async (id, userId) => {
  * @returns {Promise<number>} A promise that resolves to the number of updated rows.
  */
 exports.updateScenario = async (scenarioId, userId, updateData) => {
-  const banners = Array.isArray(updateData.Banners) ? updateData.Banners : [];
-  const contentArr = contentInputToArray(updateData.Content);
-  const [updatedRows] = await Scenario.update({
-    Name: updateData.Name,
-    Description: updateData.Description,
-    UserId: userId,
-    Baudrate: updateData.Baudrate,
-    Parity: updateData.Parity,
-    StopBits: updateData.StopBits,
-    DataBits: updateData.DataBits,
-    FlowControl: updateData.FlowControl,
-    NewLine: updateData.NewLine,
-    Banner1: banners[0] ?? updateData.Banner1 ?? null,
-    Banner2: banners[1] ?? updateData.Banner2 ?? null,
-    Content: null,
-  }, {
-    where: { Id: scenarioId, UserId: userId },
-  });
-  if (updatedRows === 0) {
+  const normalized = normalizeScenarioPayload(updateData);
+  const banners = normalized.Banners;
+  const existing = await Scenario.findOne({ where: { Id: scenarioId, UserId: userId } });
+  if (!existing) {
     const error = new Error("Không tìm thấy kịch bản để cập nhật hoặc không có quyền.");
     error.statusCode = 404;
     throw error;
   }
-  await scenarioFirestore.saveScenarioContent(scenarioId, contentArr);
-  return updatedRows;
+
+  const nextValues = {
+    Name: normalized.Name,
+    Description: normalized.Description,
+    UserId: userId,
+    Baudrate: normalized.Baudrate,
+    Parity: normalized.Parity,
+    StopBits: normalized.StopBits,
+    DataBits: normalized.DataBits,
+    FlowControl: normalized.FlowControl,
+    NewLine: normalized.NewLine,
+    Banner1: banners[0] ?? normalized.Banner1 ?? null,
+    Banner2: banners[1] ?? normalized.Banner2 ?? null,
+    Content: JSON.stringify(normalized.Content),
+  };
+
+  const tx = await sequelize.transaction();
+  try {
+    await Scenario.update(nextValues, {
+      where: { Id: scenarioId, UserId: userId },
+      transaction: tx,
+    });
+    await scenarioSyncJobService.enqueue(
+      "scenario_upsert",
+      scenarioId,
+      { content: normalized.Content },
+      null,
+      { transaction: tx }
+    );
+    await tx.commit();
+  } catch (error) {
+    await tx.rollback();
+    throw error;
+  }
+
+  return 1;
 };
 
 /**
@@ -235,15 +293,31 @@ exports.updateScenario = async (scenarioId, userId, updateData) => {
  * @returns {Promise<number>} A promise that resolves to the number of deleted rows.
  */
 exports.deleteScenario = async (id, userId) => {
-  const deletedRows = await Scenario.destroy({
-    where: { Id: id, UserId: userId },
-  });
-  if (deletedRows === 0) {
-    const error = new Error("Không tìm thấy kịch bản để xóa hoặc không có quyền.");
-    error.statusCode = 404;
+  const tx = await sequelize.transaction();
+  let deletedRows = 0;
+  try {
+    deletedRows = await Scenario.destroy({
+      where: { Id: id, UserId: userId },
+      transaction: tx,
+    });
+    if (deletedRows === 0) {
+      const error = new Error("Không tìm thấy kịch bản để xóa hoặc không có quyền.");
+      error.statusCode = 404;
+      throw error;
+    }
+    await scenarioSyncJobService.enqueue(
+      "scenario_delete",
+      id,
+      null,
+      null,
+      { transaction: tx }
+    );
+    await tx.commit();
+  } catch (error) {
+    await tx.rollback();
     throw error;
   }
-  await scenarioFirestore.deleteScenarioContent(id);
+
   return deletedRows;
 };
 
@@ -253,10 +327,11 @@ exports.deleteScenario = async (id, userId) => {
  * @returns {Promise<Array<object>>} A promise that resolves to an array of scenario objects.
  */
 exports.getScenariosByUserId = async (userId) => {
-  return await Scenario.findAll({
+  const rows = await Scenario.findAll({
     where: { UserId: userId },
     order: [['CreatedAt', 'DESC']],
   });
+  return Promise.all(rows.map((row) => attachScenarioContent(row)));
 };
 
 
@@ -265,7 +340,7 @@ exports.getScenariosByUserId = async (userId) => {
  * @returns {string} The generated share code.
  */
 function generateShareCode() {
-  return uuidv4().slice(0, 5);
+  return uuidv4().replace(/-/g, "").slice(0, 8);
 }
 
 /**
@@ -284,11 +359,42 @@ exports.shareScenario = async (id, userId) => {
     throw error;
   }
   scenario.IsShared = !scenario.IsShared;
-  if (!scenario.ShareCode) {
-    scenario.ShareCode = generateShareCode();
+  if (scenario.IsShared && !scenario.ShareCode) {
+    let assigned = false;
+    for (let i = 0; i < 5; i += 1) {
+      try {
+        scenario.ShareCode = generateShareCode();
+        await scenario.save();
+        assigned = true;
+        break;
+      } catch (error) {
+        if (error.name !== "SequelizeUniqueConstraintError" && error.original?.code !== "ER_DUP_ENTRY") {
+          throw error;
+        }
+      }
+    }
+    if (!assigned) {
+      const error = new Error("Không thể tạo mã chia sẻ duy nhất. Vui lòng thử lại.");
+      error.statusCode = 503;
+      throw error;
+    }
+    return scenario;
   }
   await scenario.save();
   return scenario;
+};
+
+/**
+ * Kiểm tra mã chia sẻ có tồn tại và đang bật IsShared (không tải Content).
+ * @param {string} shareCode
+ * @returns {Promise<boolean>}
+ */
+exports.isShareCodeAvailable = async (shareCode) => {
+  const row = await Scenario.findOne({
+    where: { ShareCode: shareCode, IsShared: true },
+    attributes: ["Id"],
+  });
+  return !!row;
 };
 
 /**

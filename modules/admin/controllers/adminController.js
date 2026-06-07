@@ -1,28 +1,52 @@
 const adminService = require("../services/adminService");
+const appMetrics = require("../../../kernels/metrics/appMetrics");
+const { sendError, sendSuccess } = require("../../../kernels/middlewares/errorHandler");
 
 exports.getSharedConfigs = async (req, res) => {
   try {
     const configs = await adminService.getSharedConfigs();
-    res.json(configs);
+    return sendSuccess(res, 200, "Lấy danh sách cấu hình chia sẻ thành công", { configs });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return sendError(res, 500, err.message, "ADMIN_GET_SHARED_CONFIGS_FAILED");
   }
 }; 
 
 exports.deleteSharedConfig = async (req, res) => {
   try {
     const deleted = await adminService.deleteSharedConfig(req.params.id);
-    res.json({ message: "Đã xóa thành công", deleted });
+    return sendSuccess(res, 200, "Đã xóa thành công", { deleted });
   } catch (err) {
-    res.status(404).json({ error: err.message });
+    return sendError(res, 404, err.message, "ADMIN_DELETE_SHARED_CONFIG_FAILED");
   }
 };
 
 exports.approveSharedConfig = async (req, res) => {
   try {
     const approved = await adminService.approveSharedConfig(req.params.id);
-    res.json({ message: "Đã duyệt thành công", approved });
+    return sendSuccess(res, 200, "Đã duyệt thành công", { approved });
   } catch (err) {
-    res.status(404).json({ error: err.message });
+    return sendError(res, 404, err.message, "ADMIN_APPROVE_SHARED_CONFIG_FAILED");
+  }
+};
+
+exports.getSyncJobsOpsSummary = async (_req, res) => {
+  try {
+    const summary = await adminService.getSyncJobsOpsSummary();
+    return sendSuccess(res, 200, "Tóm tắt SyncJobs cho vận hành", { summary });
+  } catch (err) {
+    return sendError(res, 500, err.message, "ADMIN_SYNC_JOBS_OPS_FAILED");
+  }
+};
+
+exports.getOpsAppMetrics = async (req, res) => {
+  try {
+    const data = await adminService.getOpsAppMetrics();
+    if (req.query.format === "prometheus") {
+      res.type("text/plain; charset=utf-8; version=0.0.4");
+      return res.send(appMetrics.formatPrometheusExposition(data.gauges, data.counters));
+    }
+    return sendSuccess(res, 200, "Metrics app + SyncJobs gauges", { metrics: data });
+  } catch (err) {
+    return sendError(res, 500, err.message, "ADMIN_OPS_METRICS_FAILED");
   }
 };

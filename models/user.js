@@ -4,14 +4,14 @@ module.exports = (sequelize, DataTypes) => {
   // 'DataTypes' chứa các kiểu dữ liệu có sẵn trong Sequelize (ví dụ: STRING, INTEGER, ENUM).
   const User = sequelize.define("User", {
     // Định nghĩa cột 'username'
-    username: { type: DataTypes.STRING, unique: false, allowNull: true }, // unique: false to avoid "too many keys" error
+    username: { type: DataTypes.STRING, unique: true, allowNull: true },
     password: { type: DataTypes.STRING, allowNull: true },
     // Định nghĩa cột 'email'
     email: { type: DataTypes.STRING, unique: true, allowNull: false },
     // Định nghĩa cột 'role' (vai trò của người dùng)
     role: { type: DataTypes.ENUM("admin", "user"), defaultValue: "user" },
     // Google OAuth fields
-    googleId: { type: DataTypes.STRING, unique: false, allowNull: true }, // unique: false to avoid "too many keys" error
+    googleId: { type: DataTypes.STRING, unique: true, allowNull: true },
     provider: { type: DataTypes.ENUM("local", "google"), defaultValue: "local" },
     // Local account phải xác thực email trước khi đăng nhập
     isVerified: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }

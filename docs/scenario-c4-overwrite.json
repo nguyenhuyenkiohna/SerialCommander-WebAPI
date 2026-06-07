@@ -1,0 +1,32 @@
+{
+  "Name": "Demo kịch bản đã cập nhật C4",
+  "Description": "File ghi đè C4 — đổi tên kịch bản và block Lệnh AT.",
+  "Baudrate": 115200,
+  "Parity": "none",
+  "StopBits": 1,
+  "DataBits": 8,
+  "FlowControl": "none",
+  "NewLine": "CRLF",
+  "Banners": [
+    "Banner C4 — sau ghi đè",
+    "Ví dụ banner 2"
+  ],
+  "Content": [
+    {
+      "Type": "text",
+      "Name": "Lệnh AT (C4)",
+      "Labels": ["Gửi"],
+      "TxFormats": ["AT+VERSION"],
+      "Params": [],
+      "Hint": "C4: ghi đè block text — gửi AT+VERSION."
+    },
+    {
+      "Type": "button",
+      "Name": "Nút bật đèn",
+      "Labels": ["Bật đèn"],
+      "TxFormats": ["LED ON"],
+      "Params": null,
+      "Hint": "Bấm để gửi lệnh bật đèn."
+    }
+  ]
+}

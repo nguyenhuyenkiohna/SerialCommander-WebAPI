@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
-
+const { getJwtSecret } = require("../../configs/envSecrets");
+const { sendError } = require("./errorHandler");
 
 /**
  * Xác thực thực phiên đã đăng nhập
@@ -14,17 +15,23 @@ const verifyToken = (req, res, next) => {
 
   // Kiểm tra xem header có chứa token không
   if (!authHeader) {
-    return res.status(401).json({ message: "Token không được cung cấp" });
+    return sendError(res, 401, "Token không được cung cấp", "NO_TOKEN");
   }
 
-  // Lấy token từ header
-  const token = authHeader.split(" ")[1];
+  const [scheme, token] = String(authHeader).split(" ");
+  if (scheme !== "Bearer" || !token) {
+    return sendError(
+      res,
+      401,
+      "Header Authorization phải có dạng: Bearer <token>",
+      "AUTH_HEADER_INVALID"
+    );
+  }
 
   // Kiểm tra tính hợp lệ của token
-  const secret = process.env.JWT_SECRET || "secretKey";
-  jwt.verify(token, secret, (err, decoded) => {
+  jwt.verify(token, getJwtSecret(), (err, decoded) => {
     if (err) {
-      return res.status(401).json({ message: "Token không hợp lệ" });
+      return sendError(res, 401, "Token không hợp lệ", "INVALID_TOKEN");
     }
 
     // Lưu thông tin người dùng vào request và tiếp tục
@@ -35,7 +42,7 @@ const verifyToken = (req, res, next) => {
 
 const verifyAdmin = (req, res, next) => {
   if (!req.user || req.user.role !== "admin") {
-    return res.status(403).json({ message: "Bạn không có quyền truy cập admin" });
+    return sendError(res, 403, "Bạn không có quyền truy cập admin", "FORBIDDEN");
   }
   next();
 };

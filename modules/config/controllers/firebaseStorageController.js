@@ -1,12 +1,21 @@
-const { isFirebaseReady } = require("../../../kernels/firebaseAdmin");
+const { isFirebaseReady, getStorageBucket, isStorageBucketReady } = require("../../../kernels/firebaseAdmin");
 const firebaseStorageService = require("../services/firebaseStorageService");
+const { sendError, sendSuccess } = require("../../../kernels/middlewares/errorHandler");
+const { logError } = require("../../../kernels/logging/appLogger");
 
-exports.getStatus = (req, res) => {
-  const ready = isFirebaseReady();
-  res.status(200).json({
-    firestoreAndStorage: ready,
-    maxFileMb: firebaseStorageService.getMaxBytes() / 1024 / 1024,
-    attachmentsPrefix: firebaseStorageService.getAttachmentsPrefix(),
+exports.getStatus = async (req, res) => {
+  const adminReady = isFirebaseReady();
+  const bucketReady = adminReady ? await isStorageBucketReady() : false;
+  const bucket = getStorageBucket();
+  return sendSuccess(res, 200, "Lấy trạng thái Firebase thành công", {
+    status: {
+      firestoreAndStorage: adminReady && bucketReady,
+      adminReady,
+      bucketReady,
+      bucketName: bucket?.name ?? null,
+      maxFileMb: firebaseStorageService.getMaxBytes() / 1024 / 1024,
+      attachmentsPrefix: firebaseStorageService.getAttachmentsPrefix(),
+    },
   });
 };
 
@@ -14,7 +23,7 @@ exports.uploadFile = async (req, res) => {
   const userId = String(req.user.id);
   try {
     if (!req.file || !req.file.buffer) {
-      return res.status(400).json({ error: "Thiếu file (field tên: file)." });
+      return sendError(res, 400, "Thiếu file (field tên: file).", "FIREBASE_FILE_MISSING");
     }
     const meta = await firebaseStorageService.uploadUserFile(
       userId,
@@ -22,10 +31,10 @@ exports.uploadFile = async (req, res) => {
       req.file.originalname,
       req.file.mimetype
     );
-    res.status(201).json({ message: "Đã tải lên Storage.", file: meta });
+    return sendSuccess(res, 201, "Đã tải lên Storage.", { file: meta });
   } catch (error) {
-    console.error("[firebase] Upload Storage:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    logError("[firebase] Upload Storage failed", { error: error.message });
+    return sendError(res, error.statusCode || 500, error.message, "FIREBASE_UPLOAD_FAILED");
   }
 };
 
@@ -33,10 +42,10 @@ exports.listFiles = async (req, res) => {
   const userId = String(req.user.id);
   try {
     const files = await firebaseStorageService.listUserFiles(userId);
-    res.status(200).json({ files });
+    return sendSuccess(res, 200, "Lấy danh sách file thành công", { files });
   } catch (error) {
-    console.error("[firebase] List Storage:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    logError("[firebase] List Storage failed", { error: error.message });
+    return sendError(res, error.statusCode || 500, error.message, "FIREBASE_LIST_FAILED");
   }
 };
 
@@ -45,13 +54,13 @@ exports.deleteFile = async (req, res) => {
   const fileName = req.body?.fileName ?? req.query?.fileName;
   try {
     if (!fileName || typeof fileName !== "string") {
-      return res.status(400).json({ error: "Thiếu fileName (tên file trong thư mục của bạn)." });
+      return sendError(res, 400, "Thiếu fileName (tên file trong thư mục của bạn).", "FIREBASE_FILENAME_REQUIRED");
     }
     await firebaseStorageService.deleteUserFile(userId, fileName);
-    res.status(200).json({ message: "Đã xóa file." });
+    return sendSuccess(res, 200, "Đã xóa file.");
   } catch (error) {
-    console.error("[firebase] Delete Storage:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    logError("[firebase] Delete Storage failed", { error: error.message });
+    return sendError(res, error.statusCode || 500, error.message, "FIREBASE_DELETE_FAILED");
   }
 };
 
@@ -61,16 +70,16 @@ exports.signedDownloadUrl = async (req, res) => {
   const expiresMinutes = req.query?.expiresMinutes;
   try {
     if (!fileName || typeof fileName !== "string") {
-      return res.status(400).json({ error: "Thiếu query fileName." });
+      return sendError(res, 400, "Thiếu query fileName.", "FIREBASE_FILENAME_REQUIRED");
     }
     const result = await firebaseStorageService.getSignedDownloadUrl(
       userId,
       fileName,
       expiresMinutes
     );
-    res.status(200).json(result);
+    return sendSuccess(res, 200, "Lấy signed URL thành công", { signedUrl: result });
   } catch (error) {
-    console.error("[firebase] Signed URL:", error);
-    res.status(error.statusCode || 500).json({ error: error.message });
+    logError("[firebase] Signed URL failed", { error: error.message });
+    return sendError(res, error.statusCode || 500, error.message, "FIREBASE_SIGNED_URL_FAILED");
   }
 };

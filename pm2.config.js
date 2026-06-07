@@ -1,6 +1,6 @@
 /**
  * PM2: chạy 1 process fork (tránh cluster + cùng cổng gây EADDRINUSE).
- * Trên server, deploy script copy `.env.production` thành `.env` → dùng ENV_FILE=.env
+ * Production load mặc định file `.env` (index.js — không cần ENV_FILE).
  */
 module.exports = {
   apps: [
@@ -14,7 +14,6 @@ module.exports = {
       max_memory_restart: "300M",
       env: {
         NODE_ENV: "production",
-        ENV_FILE: ".env",
         PORT: 2999,
         HOST: "0.0.0.0",
       },

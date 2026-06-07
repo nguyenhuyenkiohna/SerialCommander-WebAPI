@@ -1,8 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const { verifyToken }  = require("../kernels/middlewares/authMiddleware");
+const { sendError, sendSuccess } = require("../kernels/middlewares/errorHandler");
 const { User } = require("../models");
 const userActivityController = require("../modules/user/controllers/userActivityController");
+const userProfileController = require("../modules/user/controllers/userProfileController");
 
 router.get("/profile", verifyToken, async (req, res) => {
   try {
@@ -12,11 +14,10 @@ router.get("/profile", verifyToken, async (req, res) => {
     });
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return sendError(res, 404, "User not found", "USER_NOT_FOUND");
     }
 
-    res.json({ 
-      message: "Đây là thông tin profile của bạn", 
+    return sendSuccess(res, 200, "Đây là thông tin profile của bạn", {
       user: {
         id: user.id,
         username: user.username,
@@ -28,9 +29,11 @@ router.get("/profile", verifyToken, async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching user profile:", error);
-    res.status(500).json({ message: "Internal server error" });
+    return sendError(res, 500, "Internal server error", "USER_PROFILE_FETCH_FAILED");
   }
 });
+
+router.patch("/profile", verifyToken, userProfileController.updateProfile);
 
 // User Activity routes
 router.get("/activities", verifyToken, userActivityController.getUserActivities);

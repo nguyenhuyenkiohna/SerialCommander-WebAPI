@@ -42,13 +42,15 @@ module.exports = (sequelize) => {
     },
     CreatedAt: {
       type: DataTypes.DATE,
-      allowNull: true,
-      comment: 'Automatically added by DB trigger'
+      allowNull: false,
+      defaultValue: DataTypes.NOW,
+      comment: 'Thời điểm tạo — MySQL DEFAULT CURRENT_TIMESTAMP'
     },
     ModifiedAt: {
       type: DataTypes.DATE,
-      allowNull: true,
-      comment: 'Automatically added by DB trigger'
+      allowNull: false,
+      defaultValue: DataTypes.NOW,
+      comment: 'Thời điểm sửa — MySQL ON UPDATE CURRENT_TIMESTAMP'
     },
     Baudrate: {
       type: DataTypes.INTEGER,

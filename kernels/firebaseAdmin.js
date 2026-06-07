@@ -61,6 +61,18 @@ function getStorageBucket() {
   return admin.storage().bucket();
 }
 
+/** Kiểm tra bucket Storage thật sự tồn tại trên GCP (khác với chỉ init Admin SDK). */
+async function isStorageBucketReady() {
+  const bucket = getStorageBucket();
+  if (!bucket) return false;
+  try {
+    const [exists] = await bucket.exists();
+    return exists;
+  } catch {
+    return false;
+  }
+}
+
 function getAdmin() {
   return ensureInitialized() ? admin : null;
 }
@@ -69,5 +81,6 @@ module.exports = {
   isFirebaseReady,
   getFirestore,
   getStorageBucket,
+  isStorageBucketReady,
   getAdmin,
 };

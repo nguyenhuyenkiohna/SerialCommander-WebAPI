@@ -1,29 +1,19 @@
-const multer = require('multer');
-const path = require('path');
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, Date.now() + ext);
-  }
-});
+const multer = require("multer");
+const { ALLOWED_IMAGE_TYPES } = require("../../modules/upload/services/objectUploadService");
 
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/jpg'];
-  if (allowedTypes.includes(file.mimetype)) {
+  if (ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type'), false);
+    cb(new Error("Invalid file type"), false);
   }
 };
 
+/** Memory storage — buffer chuyển sang objectUploadService (local/S3). */
 const upload = multer({
-  storage: storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: fileFilter
+  fileFilter,
 });
 
-module.exports = upload; // Đảm bảo export middleware đúng cách
+module.exports = upload;

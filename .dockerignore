@@ -1,0 +1,11 @@
+node_modules
+.git
+.env
+.env.local
+.env.production
+uploads
+coverage
+*.log
+tests
+.firebase
+firebase_mgnt/serviceAccountKey.json
