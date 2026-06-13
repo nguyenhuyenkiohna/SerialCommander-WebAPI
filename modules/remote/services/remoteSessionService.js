@@ -2,6 +2,13 @@ const crypto = require("crypto");
 const remoteSessionStore = require("../../../kernels/remoteSession/remoteSessionStore");
 const mosquittoPasswdSync = require("../../../kernels/remoteSession/mosquittoPasswdSync");
 
+function createAppError(statusCode, code, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  return err;
+}
+
 const SESSION_ID_BYTES = 8;
 const PASSWORD_TOKEN_BYTES = 32;
 const JOIN_CHALLENGE_BYTES = 16;
@@ -13,6 +20,11 @@ function generateSessionId() {
 }
 
 function generateMqttPasswordToken() {
+  return crypto.randomBytes(PASSWORD_TOKEN_BYTES).toString("base64");
+}
+
+/** Token riêng cho envelope JSON — không trùng MQTT broker password. */
+function generateEnvelopeToken() {
   return crypto.randomBytes(PASSWORD_TOKEN_BYTES).toString("base64");
 }
 
@@ -34,13 +46,12 @@ function normalizeSessionId(sessionId) {
 
 async function createRemoteSession(userId) {
   if (!userId) {
-    const err = new Error("Thiếu userId");
-    err.statusCode = 400;
-    throw err;
+    throw createAppError(400, "REMOTE_MISSING_USER_ID", "Thiếu userId");
   }
 
   let sessionId = "";
   let mqttPasswordToken = "";
+  let envelopeToken = "";
   const joinChallenge = generateJoinChallenge();
   const ttlSeconds = remoteSessionStore.ttlSeconds();
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
@@ -48,18 +59,18 @@ async function createRemoteSession(userId) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     sessionId = generateSessionId();
     mqttPasswordToken = generateMqttPasswordToken();
+    envelopeToken = generateEnvelopeToken();
     const existing = await remoteSessionStore.getSession(sessionId);
     if (!existing) break;
     if (attempt === 4) {
-      const err = new Error("Không thể tạo sessionId duy nhất");
-      err.statusCode = 503;
-      throw err;
+      throw createAppError(503, "REMOTE_SESSION_ID_EXHAUSTED", "Không thể tạo sessionId duy nhất");
     }
   }
 
   await remoteSessionStore.saveSession(sessionId, {
     userId,
     mqttPasswordToken,
+    envelopeToken,
     joinChallenge,
     createdAt: new Date().toISOString(),
     expiresAt,
@@ -82,11 +93,13 @@ async function createRemoteSession(userId) {
   return {
     sessionId,
     mqttPasswordToken,
+    envelopeToken,
     joinChallenge,
     expiresAt,
     ttlSeconds,
     topicPrefix: `serial/chat/${sessionId}`,
     mqttBrokerPasswdSynced: passwdSync.synced === true,
+    mqttBrokerPasswdReloaded: passwdSync.needsReload === true,
     ...(mqttBrokerPasswdHint ? { mqttBrokerPasswdHint } : {}),
   };
 }
@@ -125,6 +138,8 @@ function buildSessionCredentials(sessionId, record) {
   return {
     sessionId,
     mqttPasswordToken: record.mqttPasswordToken,
+    envelopeToken: record.envelopeToken || record.mqttPasswordToken,
+    joinChallenge: record.joinChallenge,
     // Dùng expiresAt đã lưu khi tạo session thay vì tính lại (now+TTL sẽ sai với session cũ).
     expiresAt: record.expiresAt || new Date(Date.now() + ttlSeconds * 1000).toISOString(),
     ttlSeconds,
@@ -155,6 +170,27 @@ async function kickStationById(sessionId, stationId, requestUserId) {
   return true;
 }
 
+/**
+ * Host kết thúc phiên NGAY LẬP TỨC (không chờ TTL):
+ * 1. Xóa session khỏi Redis/MySQL → mọi verify/join sau đó đều 404.
+ * 2. Thu hồi user broker khỏi passwd file + HUP → credential cũ không CONNECT lại được.
+ * Chỉ host (owner) mới được phép.
+ */
+async function endRemoteSession(sessionId, requestUserId) {
+  const normalizedId = normalizeSessionId(sessionId);
+  if (!normalizedId) return { ended: false, reason: "invalid" };
+  const record = await remoteSessionStore.getSession(normalizedId);
+  if (!record) return { ended: false, reason: "not_found" };
+  if (!isSessionHost(record, requestUserId)) return { ended: false, reason: "forbidden" };
+
+  await remoteSessionStore.deleteSession(normalizedId);
+  const passwd = await mosquittoPasswdSync.removeMqttBrokerUser(normalizedId);
+  return {
+    ended: true,
+    mqttBrokerUserRemoved: passwd.removed === true,
+  };
+}
+
 module.exports = {
   SESSION_ID_PATTERN,
   JOIN_CHALLENGE_PATTERN,
@@ -168,5 +204,6 @@ module.exports = {
   buildSessionCredentials,
   registerStation,
   kickStationById,
+  endRemoteSession,
   isUserBlocked: remoteSessionStore.isUserBlocked,
 };

@@ -33,6 +33,7 @@ function makeDocChain({ exists = true, data = {} } = {}) {
       doc: jest.fn(() => docRef),
     })),
     batch: jest.fn(() => batch),
+    getAll: jest.fn(),
   };
   return { db, docRef, batch };
 }
@@ -131,6 +132,23 @@ describe("scenarioFirestoreService", () => {
     await scenarioFirestore.deleteScenarioContent("sid");
 
     expect(firebaseStorageService.deleteScenarioJsonSnapshot).not.toHaveBeenCalled();
+  });
+
+  test("batchGetScenarioContentArrays gom getAll theo chunk", async () => {
+    const { db, docRef } = makeDocChain();
+    firebaseAdmin.getFirestore.mockReturnValue(db);
+    db.getAll.mockResolvedValueOnce([
+      { id: "a", exists: true, data: () => ({ content: [1] }) },
+      { id: "b", exists: false, data: () => ({}) },
+    ]);
+
+    const map = await scenarioFirestore.batchGetScenarioContentArrays(["a", "b"]);
+
+    expect(db.collection).toHaveBeenCalled();
+    expect(db.getAll).toHaveBeenCalledTimes(1);
+    expect(db.getAll.mock.calls[0]).toHaveLength(2);
+    expect(map.get("a")).toEqual([1]);
+    expect(map.get("b")).toBeNull();
   });
 
   test("deleteScenarioContent xóa doc + snapshot", async () => {

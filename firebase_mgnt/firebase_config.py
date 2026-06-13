@@ -1,12 +1,12 @@
 # firebase_config.py
 
-# ID dự án của bạn (lấy ở tab General trong Project Settings)
-PROJECT_ID = "pikalong-df5f7" 
+# Khớp serviceAccountKey.json trong cùng thư mục (project serial-commander-2caea)
+PROJECT_ID = "serial-commander-2caea"
 
-# Đường dẫn đến file vừa tải về
+# Đường dẫn đến file service account (cùng thư mục firebase_mgnt/)
 PATH_TO_JSON = "serviceAccountKey.json"
 
-# Tên Storage Bucket (thường là project_id.appspot.com)
+# Bucket Firebase Storage (Console → Build → Storage)
 STORAGE_BUCKET = f"{PROJECT_ID}.firebasestorage.app"
 
 # Tên của thư mục lưu trong storage lưu trữ các file ngoài của kịch bản, như là ảnh, file partition.bin...

@@ -19,17 +19,24 @@ jest.mock("modules/config/services/scenarioFirestoreService", () => ({
   saveScenarioContent: jest.fn(),
   deleteScenarioContent: jest.fn(),
   getScenarioContentArray: jest.fn(),
+  batchGetScenarioContentArrays: jest.fn(),
   batchSaveScenarioContent: jest.fn(),
   batchDeleteScenarioContent: jest.fn(),
 }));
 
-jest.mock("modules/config/services/scenarioSyncJobService", () => ({
-  enqueue: jest.fn(),
+jest.mock("kernels/scenarioSyncStatus", () => ({
+  getScenarioSyncStatus: jest.fn().mockResolvedValue(null),
+  getScenarioSyncStatusBatch: jest.fn().mockResolvedValue(new Map()),
+  setScenarioSyncStatus: jest.fn(),
+}));
+
+jest.mock("modules/config/services/scenarioSyncEnqueue", () => ({
+  enqueueScenarioFirestoreSync: jest.fn(),
 }));
 
 const { Scenario, sequelize } = require("models");
 const scenarioFirestore = require("modules/config/services/scenarioFirestoreService");
-const scenarioSyncJobService = require("modules/config/services/scenarioSyncJobService");
+const scenarioSyncEnqueue = require("modules/config/services/scenarioSyncEnqueue");
 const scenarioService = require("modules/config/services/scenarioService");
 
 const validPayload = {
@@ -59,11 +66,10 @@ describe("scenarioService (outbox Redis queue)", () => {
     Scenario.destroy.mockReset();
     sequelize.transaction.mockReset();
     scenarioFirestore.getScenarioContentArray.mockReset();
-    scenarioSyncJobService.enqueue.mockReset();
-    scenarioSyncJobService.enqueue.mockReset();
+    scenarioSyncEnqueue.enqueueScenarioFirestoreSync.mockReset();
   });
 
-  test("createScenario: transaction MySQL rồi enqueue Redis, không gọi Firestore trực tiếp", async () => {
+  test("createScenario: commit MySQL rồi enqueue Redis outbox, không gọi Firestore trực tiếp", async () => {
     const tx = mockTx();
     Scenario.create.mockResolvedValue({
       Id: "new-id",
@@ -71,40 +77,35 @@ describe("scenarioService (outbox Redis queue)", () => {
       Name: "S1",
       dataValues: { Id: "new-id", UserId: "u1", Name: "S1" },
     });
-    scenarioSyncJobService.enqueue.mockResolvedValue(undefined);
+    scenarioSyncEnqueue.enqueueScenarioFirestoreSync.mockResolvedValue(undefined);
 
     const out = await scenarioService.createScenario("u1", validPayload);
 
-    expect(scenarioSyncJobService.enqueue.mock.invocationCallOrder[0]).toBeLessThan(
-      tx.commit.mock.invocationCallOrder[0]
+    expect(tx.commit.mock.invocationCallOrder[0]).toBeLessThan(
+      scenarioSyncEnqueue.enqueueScenarioFirestoreSync.mock.invocationCallOrder[0]
     );
-    expect(scenarioSyncJobService.enqueue).toHaveBeenCalledWith(
+    expect(scenarioSyncEnqueue.enqueueScenarioFirestoreSync).toHaveBeenCalledWith(
       "scenario_upsert",
       "new-id",
-      { content: expect.any(Array) },
-      null,
-      { transaction: tx }
+      { content: expect.any(Array) }
     );
     expect(tx.rollback).not.toHaveBeenCalled();
     expect(scenarioFirestore.saveScenarioContent).not.toHaveBeenCalled();
     expect(out.syncStatus).toBe("pending");
   });
 
-  test("createScenario: lỗi enqueue trong transaction → giữ lỗi gốc và rollback", async () => {
+  test("createScenario: lỗi MySQL trong transaction → rollback, không enqueue", async () => {
     const tx = mockTx();
-    Scenario.create.mockResolvedValue({
-      Id: "new-id",
-      dataValues: { Id: "new-id" },
-    });
-    const queueErr = new Error("db down");
-    scenarioSyncJobService.enqueue.mockRejectedValue(queueErr);
+    const dbErr = new Error("db down");
+    Scenario.create.mockRejectedValue(dbErr);
 
     await expect(scenarioService.createScenario("u1", validPayload)).rejects.toThrow("db down");
     expect(tx.rollback).toHaveBeenCalled();
     expect(tx.commit).not.toHaveBeenCalled();
+    expect(scenarioSyncEnqueue.enqueueScenarioFirestoreSync).not.toHaveBeenCalled();
   });
 
-  test("updateScenario: lỗi enqueue trong transaction → ném lỗi và rollback", async () => {
+  test("updateScenario: lỗi MySQL trong transaction → rollback, không enqueue", async () => {
     const tx = mockTx();
     Scenario.findOne.mockResolvedValueOnce({
       Id: "sid",
@@ -120,9 +121,7 @@ describe("scenarioService (outbox Redis queue)", () => {
       Banner1: null,
       Banner2: null,
     });
-    Scenario.update.mockResolvedValue([1]);
-    const queueErr = new Error("db full");
-    scenarioSyncJobService.enqueue.mockRejectedValue(queueErr);
+    Scenario.update.mockRejectedValue(new Error("db full"));
 
     await expect(
       scenarioService.updateScenario("sid", "u", validPayload)
@@ -130,7 +129,7 @@ describe("scenarioService (outbox Redis queue)", () => {
 
     expect(tx.rollback).toHaveBeenCalled();
     expect(tx.commit).not.toHaveBeenCalled();
-    expect(Scenario.update).toHaveBeenCalledTimes(1);
+    expect(scenarioSyncEnqueue.enqueueScenarioFirestoreSync).not.toHaveBeenCalled();
   });
 
   test("updateScenario: enqueue sau commit, không gọi Firestore trực tiếp", async () => {
@@ -150,29 +149,82 @@ describe("scenarioService (outbox Redis queue)", () => {
       Banner2: null,
     });
     Scenario.update.mockResolvedValue([1]);
-    scenarioSyncJobService.enqueue.mockResolvedValue(undefined);
+    scenarioSyncEnqueue.enqueueScenarioFirestoreSync.mockResolvedValue(undefined);
 
-    const n = await scenarioService.updateScenario("sid", "u", validPayload);
+    const out = await scenarioService.updateScenario("sid", "u", validPayload);
 
-    expect(n).toBe(1);
-    expect(scenarioSyncJobService.enqueue).toHaveBeenCalled();
+    expect(out.updatedRows).toBe(1);
+    expect(out.syncStatus).toBe("pending");
+    expect(scenarioSyncEnqueue.enqueueScenarioFirestoreSync).toHaveBeenCalledWith(
+      "scenario_upsert",
+      "sid",
+      { content: expect.any(Array) }
+    );
     expect(scenarioFirestore.saveScenarioContent).not.toHaveBeenCalled();
+  });
+
+  test("updateScenario: enqueue lỗi SAU commit → không throw, trả syncStatus degraded", async () => {
+    const tx = mockTx();
+    Scenario.findOne.mockResolvedValueOnce({
+      Id: "sid",
+      UserId: "u",
+      Name: "Old",
+      Description: "",
+      Baudrate: null,
+      Parity: "none",
+      StopBits: 1,
+      DataBits: 8,
+      FlowControl: "none",
+      NewLine: "none",
+      Banner1: null,
+      Banner2: null,
+    });
+    Scenario.update.mockResolvedValue([1]);
+    const enqueueErr = new Error("Redis outbox enqueue failed");
+    enqueueErr.statusCode = 503;
+    scenarioSyncEnqueue.enqueueScenarioFirestoreSync.mockRejectedValue(enqueueErr);
+
+    const out = await scenarioService.updateScenario("sid", "u", validPayload);
+
+    expect(out.updatedRows).toBe(1);
+    expect(out.syncStatus).toBe("degraded");
+    expect(tx.commit).toHaveBeenCalled();
+    expect(tx.rollback).not.toHaveBeenCalled();
+  });
+
+  test("createScenario: enqueue lỗi SAU commit → không throw, syncStatus degraded", async () => {
+    const tx = mockTx();
+    Scenario.create.mockResolvedValue({
+      Id: "new-id",
+      UserId: "u1",
+      Name: "S1",
+      dataValues: { Id: "new-id", UserId: "u1", Name: "S1" },
+    });
+    const enqueueErr = new Error("Redis outbox enqueue failed");
+    enqueueErr.statusCode = 503;
+    scenarioSyncEnqueue.enqueueScenarioFirestoreSync.mockRejectedValue(enqueueErr);
+
+    const out = await scenarioService.createScenario("u1", validPayload);
+
+    expect(out.Id).toBe("new-id");
+    expect(out.syncStatus).toBe("degraded");
+    expect(tx.commit).toHaveBeenCalled();
+    expect(tx.rollback).not.toHaveBeenCalled();
   });
 
   test("deleteScenario: commit transaction rồi enqueue Redis (Outbox pattern)", async () => {
     const tx = mockTx();
     Scenario.destroy.mockResolvedValue(1);
-    scenarioSyncJobService.enqueue.mockResolvedValue(undefined);
+    scenarioSyncEnqueue.enqueueScenarioFirestoreSync.mockResolvedValue(undefined);
 
-    const n = await scenarioService.deleteScenario("sid", "u");
+    const out = await scenarioService.deleteScenario("sid", "u");
 
-    expect(n).toBe(1);
-    expect(scenarioSyncJobService.enqueue).toHaveBeenCalledWith(
+    expect(out.deletedRows).toBe(1);
+    expect(out.syncStatus).toBe("pending");
+    expect(scenarioSyncEnqueue.enqueueScenarioFirestoreSync).toHaveBeenCalledWith(
       "scenario_delete",
       "sid",
-      null,
-      null,
-      { transaction: tx }
+      null
     );
     expect(tx.commit).toHaveBeenCalled();
     expect(scenarioFirestore.deleteScenarioContent).not.toHaveBeenCalled();
@@ -184,6 +236,35 @@ describe("scenarioService (outbox Redis queue)", () => {
     await expect(scenarioService.getScenarioById("x", "u")).rejects.toMatchObject({
       statusCode: 404,
     });
+  });
+
+  test("getScenariosByUserId: batch Firestore + pagination", async () => {
+    Scenario.findAndCountAll = jest.fn().mockResolvedValue({
+      rows: [
+        { dataValues: { Id: "i1", UserId: "u", Name: "A", Content: "" } },
+        { dataValues: { Id: "i2", UserId: "u", Name: "B", Content: "" } },
+      ],
+      count: 12,
+    });
+    scenarioFirestore.batchGetScenarioContentArrays.mockResolvedValue(
+      new Map([
+        ["i1", [{ k: 1 }]],
+        ["i2", null],
+      ])
+    );
+
+    const out = await scenarioService.getScenariosByUserId("u", { limit: 2, offset: 4 });
+
+    expect(Scenario.findAndCountAll).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 2, offset: 4 })
+    );
+    expect(scenarioFirestore.batchGetScenarioContentArrays).toHaveBeenCalledWith(["i1", "i2"]);
+    expect(scenarioFirestore.getScenarioContentArray).not.toHaveBeenCalled();
+    expect(out.total).toBe(12);
+    expect(out.limit).toBe(2);
+    expect(out.offset).toBe(4);
+    expect(JSON.parse(out.scenarios[0].Content)).toEqual([{ k: 1 }]);
+    expect(JSON.parse(out.scenarios[1].Content)).toEqual([]);
   });
 
   test("attachScenarioContent: ưu tiên Firestore, fallback []", async () => {

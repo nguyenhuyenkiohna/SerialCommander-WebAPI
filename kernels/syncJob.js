@@ -4,9 +4,12 @@
 const appMetrics = require("./metrics/appMetrics");
 const { logWarn, logInfo } = require("./logging/appLogger");
 const scenarioSyncQueue = require("./scenarioSyncQueue");
+const scenarioSyncStatus = require("./scenarioSyncStatus");
 const scenarioFirestore = require("../modules/config/services/scenarioFirestoreService");
+const { reconcileDlqBatch } = require("./scenarioDlqReconcile");
 
 const POLL_MS = Number(process.env.SCENARIO_OUTBOX_POLL_MS || 1000);
+const DLQ_RECONCILE_EVERY_POLLS = Number(process.env.SCENARIO_DLQ_RECONCILE_EVERY_POLLS || 60);
 const BATCH_SIZE = Number(process.env.SCENARIO_OUTBOX_BATCH_SIZE || 10);
 const MAX_RETRY_DELAY_MS = Number(process.env.SCENARIO_OUTBOX_MAX_RETRY_MS || 30000);
 
@@ -14,6 +17,7 @@ let pollTimer = null;
 let processing = false;
 let consecutiveFailureCount = 0;
 let retryBlockedUntil = 0;
+let pollCount = 0;
 
 function computeRetryDelayMs(failureCount) {
   const failures = Math.max(1, failureCount);
@@ -27,6 +31,28 @@ function resetBackoffState() {
 
 function isBackoffActive(now = Date.now()) {
   return retryBlockedUntil > now;
+}
+
+async function maybeReconcileDlq() {
+  if (DLQ_RECONCILE_EVERY_POLLS <= 0) return;
+  pollCount += 1;
+  if (pollCount % DLQ_RECONCILE_EVERY_POLLS !== 0) return;
+  try {
+    const lengths = await scenarioSyncQueue.getQueueLengths();
+    if (lengths.dlq <= 0) return;
+    const results = await reconcileDlqBatch(10);
+    if (results.length > 0) {
+      logInfo("[syncJob] DLQ reconciliation", {
+        processed: results.length,
+        outcomes: results.map((r) => r.outcome),
+      });
+      appMetrics.inc("scenario_outbox_dlq_reconcile_total", results.length);
+    }
+  } catch (err) {
+    logWarn("[syncJob] DLQ reconciliation failed", {
+      message: err.message || String(err),
+    });
+  }
 }
 
 async function processQueueBatch() {
@@ -71,8 +97,14 @@ async function processQueueBatch() {
     }
 
     await scenarioSyncQueue.ackBatch(claimedRaws);
+    for (const item of items) {
+      if (item.scenarioId) {
+        await scenarioSyncStatus.setScenarioSyncStatus(item.scenarioId, "success");
+      }
+    }
     claimedRaws = [];
     resetBackoffState();
+    scenarioSyncStatus.recordFirestoreBatchSuccess();
 
     appMetrics.inc("scenario_outbox_batches_total");
     logInfo("[syncJob] batch processed", {
@@ -84,6 +116,7 @@ async function processQueueBatch() {
     consecutiveFailureCount += 1;
     const delayMs = computeRetryDelayMs(consecutiveFailureCount);
     retryBlockedUntil = Date.now() + delayMs;
+    await scenarioSyncStatus.recordFirestoreBatchFailure();
     appMetrics.inc("scenario_outbox_batch_errors_total");
     logWarn("[syncJob] batch failed — requeue", {
       message: error.message || String(error),
@@ -101,6 +134,7 @@ async function processQueueBatch() {
       await scenarioSyncQueue.releaseOutboxLock();
     }
     processing = false;
+    await maybeReconcileDlq();
   }
 }
 

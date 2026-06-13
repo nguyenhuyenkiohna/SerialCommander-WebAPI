@@ -36,8 +36,8 @@ module.exports = {
       lines: 70,
       statements: 69,
     },
-    "modules/config/services/scenarioSyncJobService.js": {
-      branches: 40,
+    "kernels/scenarioDlqReconcile.js": {
+      branches: 60,
       functions: 80,
       lines: 75,
       statements: 75,

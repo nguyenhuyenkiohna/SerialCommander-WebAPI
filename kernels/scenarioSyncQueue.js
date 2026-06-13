@@ -1,5 +1,6 @@
 const { logWarn } = require("./logging/appLogger");
 const { getOutboxClient } = require("./redis/redisClients");
+const scenarioSyncStatus = require("./scenarioSyncStatus");
 
 const QUEUE_KEY = "queue:scenario_sync";
 const PROCESSING_KEY = "queue:scenario_sync:processing";
@@ -53,12 +54,25 @@ async function ensureRedisReady() {
 }
 
 /**
+ * Đưa job vào Redis outbox. Circuit breaker Firestore KHÔNG chặn enqueue:
+ * hàng đợi chính là nơi hấp thụ sự cố Firestore — worker tự backoff khi circuit open,
+ * job nằm chờ và được xử lý lại khi circuit đóng. Chỉ ném lỗi khi Redis không khả dụng.
  * @param {{ scenarioId: string, content?: unknown[], action: string }} payload
  */
 async function enqueue(payload) {
   try {
+    const circuitOpen = await scenarioSyncStatus.isFirestoreCircuitOpen();
+    if (circuitOpen) {
+      logWarn("[scenario-sync-queue] enqueue khi circuit open — job chờ worker retry", {
+        scenarioId: payload?.scenarioId,
+        action: payload?.action,
+      });
+    }
     const client = await ensureRedisReady();
     await client.lpush(QUEUE_KEY, buildMessage(payload));
+    if (payload?.scenarioId) {
+      await scenarioSyncStatus.setScenarioSyncStatus(payload.scenarioId, "pending");
+    }
   } catch (err) {
     const wrapped = new Error("Redis outbox enqueue failed");
     wrapped.statusCode = 503;
@@ -125,6 +139,9 @@ async function requeueBatch(raws = []) {
     const currentRetry = parsed?.retryCount || 0;
     if (currentRetry >= MAX_RETRY_COUNT) {
       await client.lpush(DLQ_KEY, raw);
+      if (parsed?.scenarioId) {
+        await scenarioSyncStatus.setScenarioSyncStatus(parsed.scenarioId, "failed");
+      }
       logWarn("[scenario-sync-queue] job moved to DLQ after max retries", {
         scenarioId: parsed?.scenarioId,
         action: parsed?.action,
@@ -169,6 +186,40 @@ async function dequeueBatch(maxItems = 10) {
   return items;
 }
 
+/** Độ dài các hàng đợi outbox (queue / processing / dlq). */
+async function getQueueLengths() {
+  const client = await ensureRedisReady();
+  const [queue, processing, dlq] = await Promise.all([
+    client.llen(QUEUE_KEY),
+    client.llen(PROCESSING_KEY),
+    client.llen(DLQ_KEY),
+  ]);
+  return {
+    queue: Number(queue),
+    processing: Number(processing),
+    dlq: Number(dlq),
+  };
+}
+
+/**
+ * Xem DLQ không xóa (đầu danh sách).
+ * @param {number} [limit]
+ * @returns {Promise<Array<{ raw: string, parsed: object|null }>>}
+ */
+async function peekDlq(limit = 20) {
+  const client = await ensureRedisReady();
+  const safeLimit = Math.max(1, Math.min(limit, 50));
+  const raws = await client.lrange(DLQ_KEY, 0, safeLimit - 1);
+  return raws.map((raw) => ({ raw, parsed: parseMessage(raw) }));
+}
+
+/** Xóa một entry khỏi DLQ sau khi reconcile. */
+async function removeFromDlq(raw) {
+  if (!raw) return;
+  const client = await ensureRedisReady();
+  await client.lrem(DLQ_KEY, 1, raw);
+}
+
 module.exports = {
   QUEUE_KEY,
   PROCESSING_KEY,
@@ -187,4 +238,7 @@ module.exports = {
   dequeueBatch,
   parseMessage,
   getRedisClient,
+  getQueueLengths,
+  peekDlq,
+  removeFromDlq,
 };

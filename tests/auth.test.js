@@ -113,10 +113,18 @@ describe("POST /api/auth/login", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("token");
+    expect(res.body).not.toHaveProperty("token");
+    expect(res.body).toHaveProperty("userId", 1);
 
-    // Verify token chứa đúng thông tin
-    const decoded = jwt.verify(res.body.token, process.env.JWT_SECRET);
+    const setCookie = res.headers["set-cookie"];
+    expect(setCookie).toBeDefined();
+    expect(String(setCookie)).toMatch(/sc_auth_token=/);
+    expect(String(setCookie)).toMatch(/httponly/i);
+
+    // Verify JWT nằm trong cookie (không phải body)
+    const cookieToken = String(setCookie).match(/sc_auth_token=([^;]+)/)?.[1];
+    expect(cookieToken).toBeDefined();
+    const decoded = jwt.verify(cookieToken, process.env.JWT_SECRET);
     expect(decoded.id).toBe(1);
     expect(decoded.username).toBe("testuser");
   });
@@ -161,6 +169,17 @@ describe("POST /api/auth/login", () => {
 
     expect(res.status).toBe(422);
     expect(res.body.message).toMatch(/mật khẩu/i);
+    expectErrorContract(res, "VALIDATION_FAILED");
+  });
+
+  test("❌ Trả về 422 khi gửi username thay vì email (legacy FE)", async () => {
+    const res = await request(app).post("/api/auth/login").send({
+      username: "test@test.com",
+      password: "somepass",
+    });
+
+    expect(res.status).toBe(422);
+    expect(res.body.message).toMatch(/Email là bắt buộc/i);
     expectErrorContract(res, "VALIDATION_FAILED");
   });
 
@@ -298,7 +317,7 @@ describe("POST /api/auth/forgot-password", () => {
     });
 
     expect(res.status).toBe(404);
-    expect(res.body.message).toMatch(/không tồn tại/i);
+    expect(res.body.message).toMatch(/không tìm thấy tài khoản/i);
     expectErrorContract(res, "AUTH_EMAIL_NOT_FOUND");
   });
 
@@ -404,7 +423,7 @@ describe("POST /api/auth/verify-reset-code", () => {
     });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/không hợp lệ/i);
+    expect(res.body.message).toMatch(/không đúng/i);
     expectErrorContract(res, "AUTH_RESET_CODE_INVALID");
   });
 });
@@ -518,6 +537,19 @@ describe("POST /api/auth/verify-email", () => {
     });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/không hợp lệ/i);
+    expect(res.body.message).toMatch(/không đúng/i);
+  });
+});
+
+// ─── LOGOUT ─────────────────────────────────────────────────────────────────
+
+describe("POST /api/auth/logout", () => {
+  test("✅ Trả 200 và xóa cookie sc_auth_token", async () => {
+    const res = await request(app).post("/api/auth/logout");
+
+    expect(res.status).toBe(200);
+    const setCookie = res.headers["set-cookie"];
+    expect(setCookie).toBeDefined();
+    expect(String(setCookie)).toMatch(/sc_auth_token=/);
   });
 });

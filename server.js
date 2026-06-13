@@ -11,7 +11,6 @@ const { isFirebaseReady } = require("./kernels/firebaseAdmin");
 const { checkSchemaVersion } = require("./kernels/dbSchemaCheck");
 const { assertDatabaseEnvLoaded } = require("./configs/databaseEnv");
 const { startAuthCodeCleanupJob } = require("./kernels/jobs/authCodeCleanupJob");
-const { startScenarioSyncJob } = require("./kernels/jobs/scenarioSyncJob");
 const { startScenarioOutboxWorker } = require("./kernels/syncJob");
 const { startMqttPasswdCleanupJob } = require("./kernels/jobs/mqttPasswdCleanupJob");
 const { logEmailConfigAtStartup } = require("./utils/emailConfig");
@@ -59,9 +58,6 @@ async function startServer() {
       startAuthCodeCleanupJob();
       startScenarioOutboxWorker();
       startMqttPasswdCleanupJob();
-      if (process.env.SCENARIO_SYNC_JOB_ENABLED !== "false") {
-        startScenarioSyncJob();
-      }
     });
   } catch (error) {
     const host = process.env.DATABASE_HOST || "localhost";

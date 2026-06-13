@@ -22,7 +22,16 @@ const {
   verifyPasswordResetCode,
   resetPasswordWithCode,
 } = require("./services/authFlowService");
+const {
+  issueRefreshToken,
+  verifyRefreshToken,
+  revokeRefreshToken,
+  revokeAllRefreshTokens,
+  REFRESH_TTL_SEC,
+} = require("./services/refreshTokenService");
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const AUTH_COOKIE_NAME = "sc_auth_token";
+const REFRESH_COOKIE_NAME = "sc_refresh_token";
 
 const generateToken = (user) => {
   return jwt.sign(
@@ -31,6 +40,60 @@ const generateToken = (user) => {
     { expiresIn: jwtConfig.ttl }
   );
 };
+
+/**
+ * Thuộc tính cookie auth — dùng chung cho set và clear để browser xóa đúng cookie
+ * khi COOKIE_SAME_SITE=none (cross-origin FE/API trên production).
+ */
+function getAuthCookieOptions() {
+  const isProd = process.env.NODE_ENV === "production";
+  const crossOrigin = process.env.COOKIE_SAME_SITE === "none";
+  return {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: crossOrigin ? "none" : "lax",
+    path: "/",
+  };
+}
+
+/**
+ * Gắn HttpOnly cookie sc_auth_token vào response.
+ * secure=true chỉ trong production (yêu cầu HTTPS).
+ * sameSite mặc định 'lax' — đủ cho same-site (FE/API cùng eTLD+1).
+ * Đặt COOKIE_SAME_SITE=none khi FE và API khác origin hẳn (cross-site) để
+ * cookie được gửi kèm fetch credentials:include qua cross-origin; yêu cầu HTTPS.
+ */
+function setAuthCookie(res, token) {
+  res.cookie(AUTH_COOKIE_NAME, token, {
+    ...getAuthCookieOptions(),
+    maxAge: 24 * 60 * 60 * 1000, // 1 ngày, khớp JWT_TTL mặc định
+  });
+}
+
+function setRefreshCookie(res, token) {
+  res.cookie(REFRESH_COOKIE_NAME, token, {
+    ...getAuthCookieOptions(),
+    maxAge: REFRESH_TTL_SEC * 1000,
+  });
+}
+
+function clearAuthCookie(res) {
+  res.clearCookie(AUTH_COOKIE_NAME, getAuthCookieOptions());
+  res.clearCookie(REFRESH_COOKIE_NAME, getAuthCookieOptions());
+}
+
+function extractRefreshTokenFromCookie(req) {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === REFRESH_COOKIE_NAME) {
+      return decodeURIComponent(part.slice(idx + 1).trim());
+    }
+  }
+  return null;
+}
 
 const sendServiceErrorOrInternal = (res, error, fallbackCode, fallbackLogLabel) => {
   if (error.status && error.code) {
@@ -64,7 +127,10 @@ exports.login = async (req, res) => {
     }
 
     const token = generateToken(user);
-    return sendSuccess(res, 200, "Đăng nhập thành công", { token });
+    const refreshToken = await issueRefreshToken(user.id);
+    setAuthCookie(res, token);
+    setRefreshCookie(res, refreshToken);
+    return sendSuccess(res, 200, "Đăng nhập thành công", { userId: user.id });
   } catch (error) {
     console.error(error);
     return sendError(res, 500, "Lỗi server. Vui lòng thử lại sau.", "AUTH_LOGIN_FAILED");
@@ -87,7 +153,7 @@ exports.register = async (req, res) => {
       return sendSuccess(
         res,
         201,
-        `Đã gửi mã xác thực (dev: ${result.devOtp}). Tài khoản chỉ được tạo sau khi nhập OTP đúng.`,
+        `Đã tạo mã xác thực (chế độ phát triển: ${result.devOtp}). Tài khoản chỉ được tạo sau khi nhập mã đúng.`,
         payload
       );
     }
@@ -95,8 +161,8 @@ exports.register = async (req, res) => {
       res,
       201,
       result.emailSent
-        ? "Đã gửi mã xác thực đến email. Nhập mã OTP để hoàn tất đăng ký — tài khoản chưa được lưu cho đến khi xác thực thành công."
-        : "Chưa gửi được email xác thực. Dùng «Gửi lại mã» hoặc cấu hình GMAIL_* trên server.",
+        ? "Đã gửi mã xác thực đến email của bạn. Vui lòng nhập mã để hoàn tất đăng ký."
+        : "Không gửi được email xác thực. Bấm «Gửi lại mã» hoặc thử lại sau.",
       payload
     );
   } catch (error) {
@@ -151,7 +217,7 @@ exports.resendVerificationCode = async (req, res) => {
       return sendSuccess(
         res,
         200,
-        `Chế độ dev: mã xác thực là ${result.devOtp} (xem log server). Cấu hình GMAIL_* để gửi email thật.`,
+        `Chế độ phát triển: mã xác thực là ${result.devOtp}.`,
         { devOtp: result.devOtp, emailSent: false }
       );
     }
@@ -175,9 +241,12 @@ exports.googleAuth = (req, res, next) => {
       `${FRONTEND_URL}/login?error=oauth_not_configured`
     );
   }
+  // Không dùng express-session cho OAuth (tránh lỗi Redis session save trên VPS).
+  // Authorization code + client secret phía server đủ an toàn; callback chỉ trả JWT qua fragment.
   passport.authenticate("google", {
     scope: ["profile", "email"],
-    state: true,
+    state: false,
+    session: false,
   })(req, res, next);
 };
 
@@ -186,10 +255,19 @@ exports.googleCallback = (req, res, next) => {
   if (!googleOAuthEnabled) {
     return res.redirect(`${FRONTEND_URL}/login?error=oauth_not_configured`);
   }
-  passport.authenticate("google", { session: true }, (err, user, info) => {
+  if (req.query.error === "access_denied") {
+    return res.redirect(`${FRONTEND_URL}/login?error=access_denied`);
+  }
+  // session:false — chỉ cần JWT; state vẫn đọc từ session cookie bước /google.
+  passport.authenticate("google", { session: false }, async (err, user, info) => {
     if (err) {
       console.error("Google OAuth error:", err);
-      return res.redirect(`${FRONTEND_URL}/login?error=oauth_failed`);
+      const msg = String(err.message || "").toLowerCase();
+      const errorCode =
+        msg.includes("client secret is invalid") || msg.includes("invalid_client")
+          ? "oauth_invalid_secret"
+          : "oauth_failed";
+      return res.redirect(`${FRONTEND_URL}/login?error=${errorCode}`);
     }
 
     if (!user) {
@@ -199,13 +277,16 @@ exports.googleCallback = (req, res, next) => {
       return res.redirect(`${FRONTEND_URL}/login?error=${errorCode}`);
     }
 
-    // Generate JWT token
+    // Generate JWT token và gắn vào HttpOnly cookie.
+    // Không đặt JWT trong URL fragment hoặc query string (rò logs/referer).
     const token = generateToken(user);
+    const refreshToken = await issueRefreshToken(user.id);
+    setAuthCookie(res, token);
+    setRefreshCookie(res, refreshToken);
     const setupProfile = user._isNewOAuthUser ? "&setupProfile=1" : "";
-
-    // Không đưa JWT qua query string (dễ rò qua logs/referer). Dùng URL fragment (#) để FE đọc,
-    // fragment không được gửi lên server trong HTTP request.
-    res.redirect(`${FRONTEND_URL}/login#token=${token}${setupProfile}`);
+    // uid không nhạy cảm — FE cần để lưu session flag.
+    // Vào thẳng app (không qua /login) — cookie đã gắn; FE đọc uid từ query rồi dọn URL.
+    res.redirect(`${FRONTEND_URL}/?oauthSuccess=1&uid=${user.id}${setupProfile}`);
   })(req, res, next);
 };
 
@@ -223,7 +304,7 @@ exports.requestPasswordReset = async (req, res) => {
       return sendError(
         res,
         404,
-        "Email không tồn tại trong hệ thống",
+        "Không tìm thấy tài khoản với email này",
         "AUTH_EMAIL_NOT_FOUND"
       );
     }
@@ -257,14 +338,69 @@ exports.verifyResetCode = async (req, res) => {
   const { email, code } = req.body;
 
   if (!email || !code) {
-    return sendError(res, 400, "Email và mã reset là bắt buộc", "AUTH_INVALID_INPUT");
+    return sendError(res, 400, "Email và mã xác nhận là bắt buộc", "AUTH_INVALID_INPUT");
   }
 
   try {
     await verifyPasswordResetCode(email, code);
-    return sendSuccess(res, 200, "Mã reset hợp lệ", { valid: true });
+    return sendSuccess(res, 200, "Mã xác nhận hợp lệ", { valid: true });
   } catch (error) {
     return sendServiceErrorOrInternal(res, error, "AUTH_VERIFY_RESET_FAILED", "Verify reset code error");
+  }
+};
+
+// Logout — xóa cả hai cookies và revoke refresh token
+exports.logout = async (req, res) => {
+  const raw = extractRefreshTokenFromCookie(req);
+  if (raw) {
+    try {
+      const payload = require("jsonwebtoken").decode(raw);
+      if (payload?.id && payload?.tokenId) {
+        await revokeRefreshToken(payload.id, payload.tokenId);
+      }
+    } catch { /* best-effort */ }
+  }
+  clearAuthCookie(res);
+  return sendSuccess(res, 200, "Đăng xuất thành công");
+};
+
+/**
+ * POST /auth/refresh
+ * Đọc sc_refresh_token cookie, xác thực, rotate: cấp access token mới + refresh token mới.
+ * Rotation: revoke token cũ ngay sau khi cấp token mới để ngăn reuse attack.
+ */
+exports.refresh = async (req, res) => {
+  const raw = extractRefreshTokenFromCookie(req);
+  if (!raw) {
+    return sendError(res, 401, "Refresh token không tồn tại.", "REFRESH_TOKEN_MISSING");
+  }
+
+  const validated = await verifyRefreshToken(raw);
+  if (!validated) {
+    clearAuthCookie(res);
+    return sendError(res, 401, "Refresh token không hợp lệ hoặc đã hết hạn.", "REFRESH_TOKEN_INVALID");
+  }
+
+  try {
+    const user = await User.findByPk(validated.userId, {
+      attributes: ["id", "username", "email", "role"],
+    });
+    if (!user) {
+      clearAuthCookie(res);
+      return sendError(res, 401, "Tài khoản không còn tồn tại.", "REFRESH_USER_NOT_FOUND");
+    }
+
+    // Revoke token cũ (rotation) trước khi cấp mới
+    await revokeRefreshToken(validated.userId, validated.tokenId);
+
+    const newAccessToken = generateToken(user);
+    const newRefreshToken = await issueRefreshToken(user.id);
+    setAuthCookie(res, newAccessToken);
+    setRefreshCookie(res, newRefreshToken);
+    return sendSuccess(res, 200, "Refresh thành công.", { userId: user.id });
+  } catch (error) {
+    console.error("Refresh error:", error);
+    return sendError(res, 500, "Lỗi server khi refresh token.", "REFRESH_FAILED");
   }
 };
 
@@ -273,7 +409,7 @@ exports.resetPassword = async (req, res) => {
   const { email, code, newPassword } = req.body;
 
   if (!email || !code || !newPassword) {
-    return sendError(res, 400, "Email, mã reset và mật khẩu mới là bắt buộc", "AUTH_INVALID_INPUT");
+    return sendError(res, 400, "Email, mã xác nhận và mật khẩu mới là bắt buộc", "AUTH_INVALID_INPUT");
   }
 
   const { validatePassword } = require("../../utils/emailValidation");

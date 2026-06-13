@@ -2,12 +2,34 @@ const { Scenario, sequelize } = require("../../../models");
 const { v4: uuidv4 } = require("uuid");
 const { logWarn, logError } = require("../../../kernels/logging/appLogger");
 const scenarioFirestore = require("./scenarioFirestoreService");
-const scenarioSyncQueue = require("../../../kernels/scenarioSyncQueue");
-const scenarioSyncJobService = require("./scenarioSyncJobService");
+const scenarioSyncStatus = require("../../../kernels/scenarioSyncStatus");
+const { enqueueScenarioFirestoreSync } = require("./scenarioSyncEnqueue");
 
 function toPlainRecord(record) {
   if (!record) return null;
   return record.dataValues ? { ...record.dataValues } : { ...record };
+}
+
+/**
+ * Enqueue đồng bộ Firestore SAU khi MySQL đã commit.
+ * MySQL là source of truth — enqueue lỗi (Redis down…) KHÔNG được làm request thất bại.
+ * Trả về syncStatus: "pending" (đã vào hàng đợi) | "degraded" (chưa vào, cần resync sau).
+ */
+async function enqueueAfterCommit(operationType, scenarioId, payload) {
+  try {
+    await enqueueScenarioFirestoreSync(operationType, scenarioId, payload);
+    return "pending";
+  } catch (error) {
+    logError("scenario sync enqueue degraded — MySQL đã commit, nội dung sẽ đồng bộ lại sau", {
+      operationType,
+      scenarioId,
+      message: error.message || String(error),
+      code: error.code,
+    });
+    // Best-effort đánh dấu degraded để list/detail API hiển thị đúng trạng thái.
+    await scenarioSyncStatus.setScenarioSyncStatus(scenarioId, "degraded");
+    return "degraded";
+  }
 }
 
 function contentInputToArray(content) {
@@ -97,15 +119,36 @@ function normalizeScenarioPayload(scenarioData) {
 /**
  * Gắn Content (chuỗi JSON mảng) từ Firestore hoặc giữ bản legacy trong MySQL.
  */
-async function attachScenarioContent(record) {
-  const out = toPlainRecord(record);
-  if (!out) return null;
-  const fromFs = await scenarioFirestore.getScenarioContentArray(out.Id);
+function applyScenarioContent(out, fromFs) {
   if (fromFs != null) {
     out.Content = JSON.stringify(fromFs);
   } else if (out.Content == null || out.Content === "") {
     out.Content = JSON.stringify([]);
   }
+  return out;
+}
+
+async function attachScenarioContent(record) {
+  const out = toPlainRecord(record);
+  if (!out) return null;
+  const fromFs = await scenarioFirestore.getScenarioContentArray(out.Id);
+  applyScenarioContent(out, fromFs);
+  const syncSt = await scenarioSyncStatus.getScenarioSyncStatus(out.Id);
+  if (syncSt) out.syncStatus = syncSt;
+  return out;
+}
+
+function attachScenarioContentFromMap(record, contentMap) {
+  const out = toPlainRecord(record);
+  if (!out) return null;
+  const fromFs = contentMap.has(out.Id) ? contentMap.get(out.Id) : null;
+  return applyScenarioContent(out, fromFs);
+}
+
+function applySyncStatus(out, statusMap) {
+  if (!out?.Id || !statusMap) return out;
+  const st = statusMap.get(out.Id);
+  if (st) out.syncStatus = st;
   return out;
 }
 
@@ -189,13 +232,6 @@ exports.createScenario = async (userId, scenarioData) => {
       },
       { transaction: tx }
     );
-    await scenarioSyncJobService.enqueue(
-      "scenario_upsert",
-      newScenario.Id,
-      { content: normalized.Content },
-      null,
-      { transaction: tx }
-    );
     await tx.commit();
   } catch (error) {
     await tx.rollback();
@@ -208,9 +244,13 @@ exports.createScenario = async (userId, scenarioData) => {
     throw error;
   }
 
+  const syncStatus = await enqueueAfterCommit("scenario_upsert", newScenario.Id, {
+    content: normalized.Content,
+  });
+
   const plain = toPlainRecord(newScenario);
   plain.Content = JSON.stringify(normalized.Content);
-  plain.syncStatus = "pending";
+  plain.syncStatus = syncStatus;
   return plain;
 };
 
@@ -270,20 +310,17 @@ exports.updateScenario = async (scenarioId, userId, updateData) => {
       where: { Id: scenarioId, UserId: userId },
       transaction: tx,
     });
-    await scenarioSyncJobService.enqueue(
-      "scenario_upsert",
-      scenarioId,
-      { content: normalized.Content },
-      null,
-      { transaction: tx }
-    );
     await tx.commit();
   } catch (error) {
     await tx.rollback();
     throw error;
   }
 
-  return 1;
+  const syncStatus = await enqueueAfterCommit("scenario_upsert", scenarioId, {
+    content: normalized.Content,
+  });
+
+  return { updatedRows: 1, syncStatus };
 };
 
 /**
@@ -305,20 +342,15 @@ exports.deleteScenario = async (id, userId) => {
       error.statusCode = 404;
       throw error;
     }
-    await scenarioSyncJobService.enqueue(
-      "scenario_delete",
-      id,
-      null,
-      null,
-      { transaction: tx }
-    );
     await tx.commit();
   } catch (error) {
     await tx.rollback();
     throw error;
   }
 
-  return deletedRows;
+  const syncStatus = await enqueueAfterCommit("scenario_delete", id, null);
+
+  return { deletedRows, syncStatus };
 };
 
 /**
@@ -326,12 +358,32 @@ exports.deleteScenario = async (id, userId) => {
  * @param {string} userId - The ID of the user.
  * @returns {Promise<Array<object>>} A promise that resolves to an array of scenario objects.
  */
-exports.getScenariosByUserId = async (userId) => {
-  const rows = await Scenario.findAll({
+/**
+ * @param {string} userId
+ * @param {{ limit?: number, offset?: number }} [options]
+ * @returns {Promise<{ scenarios: Array<object>, total: number, limit: number, offset: number }>}
+ */
+exports.getScenariosByUserId = async (userId, options = {}) => {
+  const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 100);
+  const offset = Math.max(Number(options.offset) || 0, 0);
+
+  const { rows, count } = await Scenario.findAndCountAll({
     where: { UserId: userId },
-    order: [['CreatedAt', 'DESC']],
+    order: [["CreatedAt", "DESC"]],
+    limit,
+    offset,
   });
-  return Promise.all(rows.map((row) => attachScenarioContent(row)));
+
+  const ids = rows.map((row) => toPlainRecord(row)?.Id).filter(Boolean);
+  const [contentMap, statusMap] = await Promise.all([
+    scenarioFirestore.batchGetScenarioContentArrays(ids),
+    scenarioSyncStatus.getScenarioSyncStatusBatch(ids),
+  ]);
+  const scenarios = rows
+    .map((row) => applySyncStatus(attachScenarioContentFromMap(row, contentMap), statusMap))
+    .filter(Boolean);
+
+  return { scenarios, total: count, limit, offset };
 };
 
 

@@ -4,6 +4,21 @@ const admin = require("firebase-admin");
 
 let initialized = false;
 
+function resolveServiceAccountFromEnv() {
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (!raw || typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const decoded = Buffer.from(raw.trim(), "base64").toString("utf8");
+    return JSON.parse(decoded);
+  } catch {
+    try {
+      return JSON.parse(raw.trim());
+    } catch {
+      return null;
+    }
+  }
+}
+
 function resolveServiceAccountPath() {
   const keyPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
   if (!keyPath || typeof keyPath !== "string" || keyPath.trim() === "") {
@@ -21,12 +36,20 @@ function ensureInitialized() {
   if (initialized) {
     return true;
   }
+  let serviceAccount = resolveServiceAccountFromEnv();
   const resolved = resolveServiceAccountPath();
-  if (!resolved || !fs.existsSync(resolved)) {
-    return false;
+  if (!serviceAccount) {
+    if (!resolved || !fs.existsSync(resolved)) {
+      return false;
+    }
+    try {
+      serviceAccount = JSON.parse(fs.readFileSync(resolved, "utf8"));
+    } catch (e) {
+      console.error("[firebase] Không đọc được service account file:", e.message);
+      return false;
+    }
   }
   try {
-    const serviceAccount = JSON.parse(fs.readFileSync(resolved, "utf8"));
     const projectId = serviceAccount.project_id;
     const bucket =
       process.env.FIREBASE_STORAGE_BUCKET ||

@@ -1,0 +1,5 @@
+# ACL — username CONNECT = sessionId (16 hex) từ API remote session.
+user healthcheck
+topic read $SYS/broker/version
+
+pattern readwrite serial/chat/%u/#

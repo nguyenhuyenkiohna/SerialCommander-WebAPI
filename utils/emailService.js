@@ -168,7 +168,7 @@ const sendPasswordResetEmail = async (to, resetCode) => {
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
     const name = appName();
 
-    const resetUrl = `${frontendUrl}/reset-password`;
+    const resetUrl = `${frontendUrl}/forgot-password`;
     const resetActionUrl = `${resetUrl}?code=${resetCode}&email=${encodeURIComponent(to)}`;
     const resetBodyHtml = `
               <p>Xin chào,</p>
@@ -287,7 +287,7 @@ const sendEmailVerificationCodeEmail = async (to, verificationCode) => {
     const wrapped = new Error(
       error.message?.includes("Chưa cấu hình")
         ? error.message
-        : "Không gửi được email xác thực. Kiểm tra GMAIL_* hoặc SMTP_* trong .env.local."
+        : "Không gửi được email xác thực. Vui lòng thử lại sau."
     );
     wrapped.code = "AUTH_EMAIL_SEND_FAILED";
     wrapped.status = 503;

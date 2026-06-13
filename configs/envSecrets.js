@@ -43,16 +43,30 @@ function getSessionSecret() {
   return s || "dev-only-session-secret-not-for-production";
 }
 
+function getOtpCodePepper() {
+  const pepper = process.env.OTP_CODE_PEPPER || "";
+  if (isProduction()) {
+    assertStrongEnough("OTP_CODE_PEPPER", pepper);
+    return pepper;
+  }
+  if (process.env.NODE_ENV === "test") {
+    return pepper || "test-otp-pepper-for-jest-ok";
+  }
+  return pepper || "dev-otp-pepper-not-for-production";
+}
+
 /**
  * Gọi ngay sau khi load dotenv, trước khi load route/controller dùng JWT/session.
  */
 function assertRequiredSecretsLoaded() {
   getJwtSecret();
   getSessionSecret();
+  getOtpCodePepper();
 }
 
 module.exports = {
   getJwtSecret,
   getSessionSecret,
+  getOtpCodePepper,
   assertRequiredSecretsLoaded,
 };

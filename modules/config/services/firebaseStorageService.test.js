@@ -13,6 +13,7 @@ const mockBucket = {
 jest.mock("kernels/firebaseAdmin", () => ({
   isFirebaseReady: jest.fn(),
   getStorageBucket: jest.fn(),
+  isStorageBucketReady: jest.fn(),
 }));
 
 const firebaseAdmin = require("kernels/firebaseAdmin");
@@ -23,6 +24,7 @@ describe("firebaseStorageService", () => {
     jest.clearAllMocks();
     firebaseAdmin.isFirebaseReady.mockReturnValue(true);
     firebaseAdmin.getStorageBucket.mockReturnValue(mockBucket);
+    firebaseAdmin.isStorageBucketReady.mockResolvedValue(true);
   });
 
   test("uploadUserFile throws when firebase not ready", async () => {
@@ -43,5 +45,11 @@ describe("firebaseStorageService", () => {
     expect(out).toHaveProperty("fileName", "my-file.txt");
     expect(out).toHaveProperty("bucket", "bucket-test");
     expect(mockBucket.file).toHaveBeenCalled();
+  });
+
+  test("saveScenarioJsonSnapshot skips silently when bucket not ready", async () => {
+    firebaseAdmin.isStorageBucketReady.mockResolvedValue(false);
+    await firebaseStorageService.saveScenarioJsonSnapshot("sid-1", [{ Type: "text" }]);
+    expect(mockBucket.file).not.toHaveBeenCalled();
   });
 });

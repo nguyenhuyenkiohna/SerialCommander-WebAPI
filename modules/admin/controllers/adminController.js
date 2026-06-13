@@ -32,9 +32,19 @@ exports.approveSharedConfig = async (req, res) => {
 exports.getSyncJobsOpsSummary = async (_req, res) => {
   try {
     const summary = await adminService.getSyncJobsOpsSummary();
-    return sendSuccess(res, 200, "Tóm tắt SyncJobs cho vận hành", { summary });
+    return sendSuccess(res, 200, "Tóm tắt outbox đồng bộ kịch bản", { summary });
   } catch (err) {
     return sendError(res, 500, err.message, "ADMIN_SYNC_JOBS_OPS_FAILED");
+  }
+};
+
+exports.reconcileScenarioOutboxDlq = async (req, res) => {
+  try {
+    const maxItems = Math.min(50, Math.max(1, Number(req.body?.maxItems) || 20));
+    const result = await adminService.reconcileScenarioOutboxDlq(maxItems);
+    return sendSuccess(res, 200, "Đã chạy reconciliation DLQ từ MySQL", { reconciliation: result });
+  } catch (err) {
+    return sendError(res, 500, err.message, "ADMIN_DLQ_RECONCILE_FAILED");
   }
 };
 

@@ -28,8 +28,10 @@ function createAppError(status, code, message) {
   return error;
 }
 
-const OTP_INVALID_MESSAGE = "Mã xác thực không hợp lệ hoặc đã hết hạn";
-const RESET_INVALID_MESSAGE = "Mã reset không hợp lệ hoặc đã được sử dụng";
+const OTP_INVALID_MESSAGE =
+  "Mã xác thực không đúng hoặc đã hết hạn. Vui lòng kiểm tra lại email hoặc yêu cầu mã mới.";
+const RESET_INVALID_MESSAGE =
+  "Mã xác nhận không đúng hoặc đã hết hạn. Vui lòng kiểm tra lại email hoặc yêu cầu mã mới.";
 
 async function verifyEmailCode(email, code, preferredUsername) {
   const normalizedEmail = assertValidEmail(email);
@@ -58,7 +60,7 @@ async function verifyEmailCode(email, code, preferredUsername) {
       throw createAppError(400, "AUTH_OTP_INVALID", OTP_INVALID_MESSAGE);
     }
     if (new Date() > verifyRecord.expiresAt) {
-      throw createAppError(400, "AUTH_OTP_EXPIRED", "Mã xác thực đã hết hạn. Vui lòng yêu cầu mã mới.");
+      throw createAppError(400, "AUTH_OTP_EXPIRED", OTP_INVALID_MESSAGE);
     }
     await legacyUser.update({ isVerified: true });
     await verifyRecord.destroy();
@@ -148,7 +150,7 @@ async function verifyPasswordResetCode(email, code) {
     throw createAppError(400, "AUTH_RESET_CODE_INVALID", RESET_INVALID_MESSAGE);
   }
   if (new Date() > resetRecord.expiresAt) {
-    throw createAppError(400, "AUTH_RESET_CODE_EXPIRED", "Mã reset đã hết hạn. Vui lòng yêu cầu mã mới.");
+    throw createAppError(400, "AUTH_RESET_CODE_EXPIRED", RESET_INVALID_MESSAGE);
   }
   return { valid: true };
 }
@@ -165,7 +167,7 @@ async function resetPasswordWithCode(email, code, newPassword) {
     throw createAppError(400, "AUTH_RESET_CODE_INVALID", RESET_INVALID_MESSAGE);
   }
   if (new Date() > resetRecord.expiresAt) {
-    throw createAppError(400, "AUTH_RESET_CODE_EXPIRED", "Mã reset đã hết hạn. Vui lòng yêu cầu mã mới.");
+    throw createAppError(400, "AUTH_RESET_CODE_EXPIRED", RESET_INVALID_MESSAGE);
   }
 
   const [affectedCount] = await PasswordReset.update(

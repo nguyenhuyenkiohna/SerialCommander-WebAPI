@@ -18,7 +18,7 @@
     "openapi:generate": "node scripts/generate-openapi.js",
     "openapi:check": "npm run openapi:generate && git diff --exit-code -- openapi/openapi.json",
     "preflight": "NODE_ENV=production node scripts/preflight.js",
-    "deploy": "python3 \"release 2.py\"",
+    "deploy": "python3 release_deploy.py",
     "release": "npm run build && npm run deploy"
   },
   "author": "",

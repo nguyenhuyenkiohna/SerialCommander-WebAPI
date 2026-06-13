@@ -39,5 +39,11 @@ router.post(
   createSimpleRateLimit({ windowMs: 60 * 1000, maxRequests: 60 }),
   remoteSessionController.kickSessionStation
 );
+router.post(
+  "/session/end",
+  verifyToken,
+  createSimpleRateLimit({ windowMs: 60 * 1000, maxRequests: 30 }),
+  remoteSessionController.endSession
+);
 
 module.exports = router;

@@ -1,6 +1,7 @@
-const { QueryTypes } = require("sequelize");
 const appMetrics = require("../../../kernels/metrics/appMetrics");
-const { Scenario, SyncJob } = require("../../../models");
+const scenarioSyncQueue = require("../../../kernels/scenarioSyncQueue");
+const { reconcileDlqBatch } = require("../../../kernels/scenarioDlqReconcile");
+const { Scenario } = require("../../../models");
 
 exports.getSharedConfigs = async () => {
   return await Scenario.findAll({ where: { IsShared: true } });
@@ -14,6 +15,7 @@ exports.deleteSharedConfig = async (id) => {
   await config.destroy();
   return config;
 };
+
 exports.approveSharedConfig = async (id) => {
   const config = await Scenario.findByPk(id);
   if (!config) {
@@ -24,67 +26,70 @@ exports.approveSharedConfig = async (id) => {
 };
 
 /**
- * Bảng điều khiển vận hành: trạng thái hàng đợi đồng bộ MySQL ↔ Firestore (SyncJobs).
+ * Bảng điều khiển vận hành: trạng thái Redis outbox (queue / processing / DLQ).
+ * Giữ tên hàm/API cũ (sync-jobs) để không gãy dashboard — dữ liệu từ outbox thay vì bảng SyncJobs.
  */
 exports.getSyncJobsOpsSummary = async () => {
-  const sequelize = SyncJob.sequelize;
+  const lengths = await scenarioSyncQueue.getQueueLengths();
+  const dlqEntries = await scenarioSyncQueue.peekDlq(20);
 
-  const byStatusRows = await sequelize.query(
-    `SELECT Status AS status, COUNT(*) AS cnt FROM SyncJobs GROUP BY Status ORDER BY Status`,
-    { type: QueryTypes.SELECT }
-  );
-
-  const dueRows = await sequelize.query(
-    `SELECT COUNT(*) AS cnt FROM SyncJobs WHERE Status IN ('pending','failed') AND (NextRetryAt IS NULL OR NextRetryAt <= UTC_TIMESTAMP())`,
-    { type: QueryTypes.SELECT }
-  );
-
-  const failedRecent = await sequelize.query(
-    `SELECT Id, OperationType, ScenarioId, RetryCount, LastError, ModifiedAt
-     FROM SyncJobs WHERE Status = 'failed' ORDER BY ModifiedAt DESC LIMIT 20`,
-    { type: QueryTypes.SELECT }
-  );
-
-  const by_status = {};
-  for (const row of byStatusRows) {
-    by_status[row.status] = Number(row.cnt);
-  }
+  const by_status = {
+    pending: lengths.queue,
+    processing: lengths.processing,
+    failed: lengths.dlq,
+  };
 
   return {
     generated_at: new Date().toISOString(),
+    source: "redis_outbox",
     by_status,
-    due_for_processing: Number(dueRows[0]?.cnt ?? 0),
-    failed_recent: failedRecent.map((r) => ({
-      id: String(r.Id),
-      operation_type: r.OperationType,
-      scenario_id: r.ScenarioId,
-      retry_count: r.RetryCount,
-      last_error: r.LastError || null,
-      modified_at: r.ModifiedAt ? new Date(r.ModifiedAt).toISOString() : null,
-    })),
+    due_for_processing: lengths.queue,
+    failed_recent: dlqEntries
+      .filter((e) => e.parsed)
+      .map((e) => ({
+        id: e.raw.slice(0, 32),
+        operation_type: e.parsed.action,
+        scenario_id: e.parsed.scenarioId,
+        retry_count: e.parsed.retryCount || 0,
+        last_error: "max_retries_exceeded",
+        modified_at: e.parsed.enqueuedAt || null,
+      })),
+    queue_lengths: lengths,
   };
 };
 
 /**
- * Counters in-process + gauge từ bảng SyncJobs (scraping Prometheus / Grafana).
+ * Chạy reconciliation DLQ thủ công (admin): đọc MySQL → re-enqueue.
+ * @param {number} [maxItems]
+ */
+exports.reconcileScenarioOutboxDlq = async (maxItems = 20) => {
+  const before = await scenarioSyncQueue.getQueueLengths();
+  const results = await reconcileDlqBatch(maxItems);
+  const after = await scenarioSyncQueue.getQueueLengths();
+  return {
+    generated_at: new Date().toISOString(),
+    processed: results.length,
+    results,
+    queue_lengths_before: before,
+    queue_lengths_after: after,
+  };
+};
+
+/**
+ * Counters in-process + gauge từ Redis outbox (scraping Prometheus / Grafana).
  */
 exports.getOpsAppMetrics = async () => {
-  const sequelize = SyncJob.sequelize;
-  const byStatusRows = await sequelize.query(
-    `SELECT Status AS status, COUNT(*) AS cnt FROM SyncJobs GROUP BY Status`,
-    { type: QueryTypes.SELECT }
-  );
-  const dueRows = await sequelize.query(
-    `SELECT COUNT(*) AS cnt FROM SyncJobs WHERE Status IN ('pending','failed') AND (NextRetryAt IS NULL OR NextRetryAt <= UTC_TIMESTAMP())`,
-    { type: QueryTypes.SELECT }
-  );
+  const lengths = await scenarioSyncQueue.getQueueLengths();
 
   const gauges = {
-    sync_jobs_due_for_processing: Number(dueRows[0]?.cnt ?? 0),
+    sync_jobs_due_for_processing: lengths.queue,
+    sync_jobs_pending: lengths.queue,
+    sync_jobs_processing: lengths.processing,
+    sync_jobs_failed: lengths.dlq,
+    scenario_outbox_queue: lengths.queue,
+    scenario_outbox_processing: lengths.processing,
+    scenario_outbox_dlq: lengths.dlq,
   };
-  for (const row of byStatusRows) {
-    gauges[`sync_jobs_${row.status}`] = Number(row.cnt);
-  }
 
   Object.assign(gauges, appMetrics.getLatencyGaugeSnapshot());
 

@@ -118,7 +118,12 @@ describe("Scenario API (integration)", () => {
     });
 
     test("200 GET /scenarios/myscenarios khi có token (envelope scenarios)", async () => {
-      jest.spyOn(scenarioService, "getScenariosByUserId").mockResolvedValue([]);
+      jest.spyOn(scenarioService, "getScenariosByUserId").mockResolvedValue({
+        scenarios: [],
+        total: 0,
+        limit: 50,
+        offset: 0,
+      });
       const res = await request(app)
         .get("/scenarios/myscenarios")
         .set(auth)
@@ -126,10 +131,16 @@ describe("Scenario API (integration)", () => {
       expect(Array.isArray(res.body.scenarios)).toBe(true);
       expect(res.body.scenarios).toHaveLength(0);
       expect(typeof res.body.message).toBe("string");
+      expect(res.body.pagination).toMatchObject({ total: 0, hasMore: false });
     });
 
     test("200 GET /scenarios/myscenarios?legacy_array=1 trả mảng thuần", async () => {
-      jest.spyOn(scenarioService, "getScenariosByUserId").mockResolvedValue([{ Id: "1", Name: "A" }]);
+      jest.spyOn(scenarioService, "getScenariosByUserId").mockResolvedValue({
+        scenarios: [{ Id: "1", Name: "A" }],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      });
       const res = await request(app)
         .get("/scenarios/myscenarios?legacy_array=1")
         .set(auth)

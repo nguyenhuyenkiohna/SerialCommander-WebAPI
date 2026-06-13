@@ -2,56 +2,56 @@ process.env.NODE_ENV = "test";
 
 require("rootpath")();
 
-const { QueryTypes } = require("sequelize");
+jest.mock("kernels/scenarioSyncQueue", () => ({
+  getQueueLengths: jest.fn(),
+  peekDlq: jest.fn(),
+}));
+
+jest.mock("kernels/scenarioDlqReconcile", () => ({
+  reconcileDlqBatch: jest.fn(),
+}));
 
 jest.mock("models", () => ({
   Scenario: {},
-  SyncJob: {
-    sequelize: {
-      query: jest.fn(),
-    },
-  },
 }));
 
-const { SyncJob } = require("models");
+const scenarioSyncQueue = require("kernels/scenarioSyncQueue");
 const adminService = require("./adminService");
 
-describe("adminService.getSyncJobsOpsSummary", () => {
+describe("adminService.getSyncJobsOpsSummary (redis outbox)", () => {
   beforeEach(() => {
-    SyncJob.sequelize.query.mockReset();
+    scenarioSyncQueue.getQueueLengths.mockReset();
+    scenarioSyncQueue.peekDlq.mockReset();
   });
 
-  test("gộp by_status, due_for_processing và failed_recent", async () => {
-    SyncJob.sequelize.query
-      .mockResolvedValueOnce([
-        { status: "failed", cnt: 1 },
-        { status: "pending", cnt: 4 },
-      ])
-      .mockResolvedValueOnce([{ cnt: 5 }])
-      .mockResolvedValueOnce([
-        {
-          Id: 99n,
-          OperationType: "upsert",
-          ScenarioId: "s1",
-          RetryCount: 3,
-          LastError: "timeout",
-          ModifiedAt: new Date("2026-05-09T10:00:00.000Z"),
+  test("gộp queue lengths và DLQ peek vào summary", async () => {
+    scenarioSyncQueue.getQueueLengths.mockResolvedValue({
+      queue: 4,
+      processing: 1,
+      dlq: 2,
+    });
+    scenarioSyncQueue.peekDlq.mockResolvedValue([
+      {
+        raw: '{"scenarioId":"s1","action":"SYNC_FIRESTORE","retryCount":5}',
+        parsed: {
+          scenarioId: "s1",
+          action: "SYNC_FIRESTORE",
+          retryCount: 5,
+          enqueuedAt: "2026-06-10T00:00:00.000Z",
         },
-      ]);
+      },
+    ]);
 
     const summary = await adminService.getSyncJobsOpsSummary();
 
-    expect(summary.by_status).toEqual({ failed: 1, pending: 4 });
-    expect(summary.due_for_processing).toBe(5);
+    expect(summary.source).toBe("redis_outbox");
+    expect(summary.by_status).toEqual({ pending: 4, processing: 1, failed: 2 });
+    expect(summary.due_for_processing).toBe(4);
     expect(summary.failed_recent).toHaveLength(1);
     expect(summary.failed_recent[0]).toMatchObject({
-      id: "99",
-      operation_type: "upsert",
+      operation_type: "SYNC_FIRESTORE",
       scenario_id: "s1",
-      retry_count: 3,
-      last_error: "timeout",
+      retry_count: 5,
     });
-    expect(SyncJob.sequelize.query).toHaveBeenCalledTimes(3);
-    expect(SyncJob.sequelize.query.mock.calls[0][1]).toEqual({ type: QueryTypes.SELECT });
   });
 });

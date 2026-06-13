@@ -1,7 +1,6 @@
+const { USER_TABLE } = require("../configs/dbFieldNaming");
+
 module.exports = (sequelize, DataTypes) => {
-  // Định nghĩa model 'User' sử dụng sequelize.
-  // 'sequelize' là instance kết nối đến database.
-  // 'DataTypes' chứa các kiểu dữ liệu có sẵn trong Sequelize (ví dụ: STRING, INTEGER, ENUM).
   const User = sequelize.define("User", {
     // Định nghĩa cột 'username'
     username: { type: DataTypes.STRING, unique: true, allowNull: true },
@@ -14,8 +13,11 @@ module.exports = (sequelize, DataTypes) => {
     googleId: { type: DataTypes.STRING, unique: true, allowNull: true },
     provider: { type: DataTypes.ENUM("local", "google"), defaultValue: "local" },
     // Local account phải xác thực email trước khi đăng nhập
-    isVerified: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }
-    });
+    isVerified: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  }, {
+    tableName: USER_TABLE,
+    timestamps: false,
+  });
 
   // Định nghĩa mối quan hệ giữa các models. Thiết lập quan hệ 1-n
   User.associate = (models) => {

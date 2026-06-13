@@ -30,9 +30,14 @@ exports.createScenario = async (req, res) => {
   const userId = req.user.id;
   try {
     const newScenario = await scenarioService.createScenario(userId, req.body);
-    return sendSuccess(res, 202, "Đã chấp nhận tạo kịch bản — đang đồng bộ nội dung lên Firestore.", {
+    const syncStatus = newScenario.syncStatus || "pending";
+    const message =
+      syncStatus === "degraded"
+        ? "Đã lưu kịch bản (MySQL). Đồng bộ Firestore tạm gián đoạn — sẽ tự đồng bộ lại."
+        : "Đã chấp nhận tạo kịch bản — đang đồng bộ nội dung lên Firestore.";
+    return sendSuccess(res, 202, message, {
       scenario: newScenario,
-      syncStatus: "pending",
+      syncStatus,
     });
   } catch (error) {
     respondScenarioError(res, error, "SCENARIO_CREATE_FAILED");
@@ -68,10 +73,14 @@ exports.updateScenario = async (req, res) => {
   const { scenarioId } = req.params;
   const userId = req.user.id;
   try {
-    await scenarioService.updateScenario(scenarioId, userId, req.body);
-    return sendSuccess(res, 202, "Đã chấp nhận cập nhật — đang đồng bộ nội dung lên Firestore.", {
+    const { syncStatus } = await scenarioService.updateScenario(scenarioId, userId, req.body);
+    const message =
+      syncStatus === "degraded"
+        ? "Đã lưu cập nhật (MySQL). Đồng bộ Firestore tạm gián đoạn — sẽ tự đồng bộ lại."
+        : "Đã chấp nhận cập nhật — đang đồng bộ nội dung lên Firestore.";
+    return sendSuccess(res, 202, message, {
       scenarioId,
-      syncStatus: "pending",
+      syncStatus,
     });
   } catch (error) {
     respondScenarioError(res, error, "SCENARIO_UPDATE_FAILED");
@@ -85,10 +94,14 @@ exports.deleteScenario = async (req, res) => {
   const { scenarioId } = req.params;
   const userId = req.user.id;
   try {
-    await scenarioService.deleteScenario(scenarioId, userId);
-    return sendSuccess(res, 202, "Đã chấp nhận xóa — đang đồng bộ xóa trên Firestore.", {
+    const { syncStatus } = await scenarioService.deleteScenario(scenarioId, userId);
+    const message =
+      syncStatus === "degraded"
+        ? "Đã xóa kịch bản (MySQL). Đồng bộ xóa Firestore tạm gián đoạn — sẽ tự đồng bộ lại."
+        : "Đã chấp nhận xóa — đang đồng bộ xóa trên Firestore.";
+    return sendSuccess(res, 202, message, {
       scenarioId,
-      syncStatus: "pending",
+      syncStatus,
     });
   } catch (error) {
     respondScenarioError(res, error, "SCENARIO_DELETE_FAILED");
@@ -188,12 +201,29 @@ exports.exportScenarioById = async (req, res) => {
 exports.getScenariosByUserId = async (req, res) => {
   const userId = req.user.id;
   try {
-    const scenarios = await scenarioService.getScenariosByUserId(userId);
+    const limit = req.query.limit;
+    const offset = req.query.offset;
+    const { scenarios, total, limit: safeLimit, offset: safeOffset } =
+      await scenarioService.getScenariosByUserId(userId, { limit, offset });
     /** Tương thích client cũ: mảng JSON thuần ở root (không có envelope). */
     if (req.query.legacy_array === "1") {
       return res.status(200).json(scenarios);
     }
-    return sendSuccess(res, 200, "Lấy danh sách kịch bản thành công.", { scenarios }, scenarioListEnvelopeSchema);
+    return sendSuccess(
+      res,
+      200,
+      "Lấy danh sách kịch bản thành công.",
+      {
+        scenarios,
+        pagination: {
+          total,
+          limit: safeLimit,
+          offset: safeOffset,
+          hasMore: safeOffset + scenarios.length < total,
+        },
+      },
+      scenarioListEnvelopeSchema
+    );
   } catch (error) {
     respondScenarioError(res, error, "SCENARIO_LIST_FAILED");
   }

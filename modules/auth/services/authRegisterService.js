@@ -71,12 +71,19 @@ function mapRegisterError(error) {
     return { status: error.status, code: error.code, message: error.message };
   }
 
+  if (/OTP_CODE_PEPPER/i.test(error.message || "")) {
+    return {
+      status: 500,
+      code: "AUTH_CONFIG",
+      message: "Lỗi server. Vui lòng thử lại sau.",
+    };
+  }
+
   if (sqlMsg && (/Unknown column/i.test(sqlMsg) || /doesn't exist/i.test(sqlMsg))) {
     return {
       status: 500,
       code: "DB_SCHEMA",
-      message:
-        "Lỗi cơ sở dữ liệu khi đăng ký (schema có thể chưa đồng bộ). Chạy migration PendingRegistrations (schema v12).",
+      message: "Lỗi hệ thống. Vui lòng thử lại sau hoặc liên hệ quản trị viên.",
     };
   }
 

@@ -15,14 +15,17 @@ describe("remoteSessionService", () => {
     else delete process.env.MQTT_PASSWD_FILE;
   });
 
-  test("createRemoteSession trả sessionId, mqttPasswordToken và joinChallenge", async () => {
+  test("createRemoteSession trả sessionId, mqttPasswordToken, envelopeToken và joinChallenge", async () => {
     const session = await remoteSessionService.createRemoteSession(42);
     expect(session.sessionId).toMatch(/^[a-f0-9]{16}$/);
     expect(session.joinChallenge).toMatch(/^[a-f0-9]{32}$/);
     expect(session.mqttPasswordToken.length).toBeGreaterThan(20);
+    expect(session.envelopeToken.length).toBeGreaterThan(20);
+    expect(session.envelopeToken).not.toBe(session.mqttPasswordToken);
     expect(session.ttlSeconds).toBeGreaterThan(0);
     expect(session.topicPrefix).toBe(`serial/chat/${session.sessionId}`);
     expect(typeof session.mqttBrokerPasswdSynced).toBe("boolean");
+    expect(session.mqttBrokerPasswdReloaded).toBe(false);
   });
 
   test("verifyRemoteSession đúng/sai token", async () => {
@@ -54,11 +57,12 @@ describe("remoteSessionService", () => {
     ).toBe(false);
   });
 
-  test("buildSessionCredentials trả mqttPasswordToken", async () => {
+  test("buildSessionCredentials trả mqttPasswordToken và envelopeToken", async () => {
     const session = await remoteSessionService.createRemoteSession(3);
     const record = await remoteSessionService.getSessionRecord(session.sessionId);
     const creds = remoteSessionService.buildSessionCredentials(session.sessionId, record);
     expect(creds.mqttPasswordToken).toBe(session.mqttPasswordToken);
+    expect(creds.envelopeToken).toBe(session.envelopeToken);
   });
 
   test("normalizeSessionId từ chối mã 6 ký tự cũ", () => {
@@ -69,5 +73,46 @@ describe("remoteSessionService", () => {
   test("getSessionRecord null khi phòng không tồn tại", async () => {
     const missing = await remoteSessionService.getSessionRecord("b".repeat(16));
     expect(missing).toBeNull();
+  });
+
+  test("createRemoteSession(null) ném lỗi REMOTE_MISSING_USER_ID", async () => {
+    await expect(remoteSessionService.createRemoteSession(null))
+      .rejects.toMatchObject({ code: "REMOTE_MISSING_USER_ID", statusCode: 400 });
+  });
+
+  test("endRemoteSession: host kết thúc phiên → session bị xóa ngay, verify sau đó fail", async () => {
+    const session = await remoteSessionService.createRemoteSession(11);
+    const result = await remoteSessionService.endRemoteSession(session.sessionId, 11);
+    expect(result.ended).toBe(true);
+
+    const record = await remoteSessionService.getSessionRecord(session.sessionId);
+    expect(record).toBeNull();
+    const stillValid = await remoteSessionService.verifyRemoteSession(
+      session.sessionId,
+      session.mqttPasswordToken
+    );
+    expect(stillValid).toBe(false);
+  });
+
+  test("endRemoteSession: không phải host → forbidden, session còn nguyên", async () => {
+    const session = await remoteSessionService.createRemoteSession(12);
+    const result = await remoteSessionService.endRemoteSession(session.sessionId, 999);
+    expect(result.ended).toBe(false);
+    expect(result.reason).toBe("forbidden");
+
+    const record = await remoteSessionService.getSessionRecord(session.sessionId);
+    expect(record).not.toBeNull();
+  });
+
+  test("endRemoteSession: session không tồn tại → not_found", async () => {
+    const result = await remoteSessionService.endRemoteSession("c".repeat(16), 1);
+    expect(result.ended).toBe(false);
+    expect(result.reason).toBe("not_found");
+  });
+
+  test("endRemoteSession: sessionId không hợp lệ → invalid", async () => {
+    const result = await remoteSessionService.endRemoteSession("abc", 1);
+    expect(result.ended).toBe(false);
+    expect(result.reason).toBe("invalid");
   });
 });

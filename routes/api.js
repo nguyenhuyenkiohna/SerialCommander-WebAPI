@@ -30,6 +30,15 @@ const scenarioReadRateLimit = createSimpleRateLimit({
   windowMs: 60 * 1000,
   maxRequests: Number(process.env.SCENARIO_RL_READ_PER_MIN ?? 120),
 });
+/**
+ * Public share-code endpoint: không có auth → keyed by IP.
+ * Ngăn brute-force enumerate 36^6 share codes.
+ * Mặc định 20 req/min/IP — đủ cho use-case bình thường, chặn automation.
+ */
+const shareCodePublicRateLimit = createSimpleRateLimit({
+  windowMs: 60 * 1000,
+  maxRequests: Number(process.env.SCENARIO_RL_SHARE_PUBLIC_PER_MIN ?? 20),
+});
 
 // Middleware để đọc body dạng text (cho kiểm tra file .json thô)
 const textBodyParser = express.text({ type: "text/plain", limit: "2mb" });
@@ -180,8 +189,8 @@ router.post("/verify-file", verifyRateLimit, textBodyParser, scenarioController.
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/share/:shareCode/availability", validateShareCode, scenarioController.getShareAvailability);
-router.get("/share/:shareCode", validateShareCode, scenarioController.getScenarioByShareCode);
+router.get("/share/:shareCode/availability", shareCodePublicRateLimit, validateShareCode, scenarioController.getShareAvailability);
+router.get("/share/:shareCode", shareCodePublicRateLimit, validateShareCode, scenarioController.getScenarioByShareCode);
 
 // Admin routes
 router.group("/admin/shared-configs", verifyToken, (router) => {
@@ -212,6 +221,7 @@ router.group("/admin/shared-configs", verifyToken, (router) => {
 router.group("/admin/ops/sync-jobs", verifyToken, (router) => {
   router.use(verifyAdmin);
   router.get("/", adminController.getSyncJobsOpsSummary);
+  router.post("/reconcile-dlq", adminController.reconcileScenarioOutboxDlq);
 });
 
 /**

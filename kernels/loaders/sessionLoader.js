@@ -2,10 +2,18 @@ const session = require("express-session");
 const Redis = require("ioredis");
 
 function buildSessionStore() {
+  // Jest/integration tests: memory store — tránh TCPWRAP open handle từ ioredis
+  if (process.env.NODE_ENV === "test") {
+    return undefined;
+  }
+
   const sessionRedisUrl = process.env.SESSION_REDIS_URL || process.env.RATE_LIMIT_REDIS_URL;
   if (!sessionRedisUrl) {
     if (process.env.NODE_ENV === "production") {
-      console.warn("[session] Using memory session store in production. Set SESSION_REDIS_URL.");
+      console.error(
+        "❌ CRITICAL: SESSION_REDIS_URL (or RATE_LIMIT_REDIS_URL) is required in production. Exiting..."
+      );
+      process.exit(1);
     }
     return undefined;
   }
@@ -13,12 +21,20 @@ function buildSessionStore() {
   try {
     const { RedisStore } = require("connect-redis");
     const redisClient = new Redis(sessionRedisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
-      enableOfflineQueue: false,
+      // connect-redis + ioredis: null tránh lỗi khi ghi session trước khi socket sẵn sàng
+      maxRetriesPerRequest: null,
+      enableOfflineQueue: true,
+      connectTimeout: 10000,
     });
     return new RedisStore({ client: redisClient });
   } catch (error) {
+    if (process.env.NODE_ENV === "production") {
+      console.error(
+        "❌ CRITICAL: Cannot initialize Redis session store in production:",
+        error.message
+      );
+      process.exit(1);
+    }
     console.warn("[session] Cannot initialize Redis session store:", error.message);
     return undefined;
   }

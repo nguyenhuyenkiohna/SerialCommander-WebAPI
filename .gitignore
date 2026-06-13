@@ -1,10 +1,39 @@
-node_modules
-upload
+node_modules/
+upload/
 uploads/
-.env
-.env.local
-.env.production
-.DS_Store
+dist/
+build/
+
+# Environment & deploy templates — giữ local, không commit
+.env*
+**/.env*
+
+# Deploy & credentials (có host/username deploy — không public)
+deploy-config.json
+deploy-config.example.json
+**/deploy-config*.json
 **/serviceAccountKey.json
+firebase_mgnt/serviceAccountKey.json
+
+# Python venv (firebase_mgnt)
 firebase_mgnt/venv/
-deploy-config.jsoncoverage/
+
+# Logs & coverage
+logs/
+*.log
+coverage/
+.nyc_output/
+
+# Build artifacts
+*.tsbuildinfo
+.DS_Store
+
+# Testing
+playwright-report/
+test-results/
+
+# Markdown & PDF — không public
+*.md
+**/*.md
+*.pdf
+docs/

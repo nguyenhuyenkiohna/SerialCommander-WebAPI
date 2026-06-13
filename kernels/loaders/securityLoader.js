@@ -3,6 +3,7 @@ const helmet = require("helmet");
 const cors = require("cors");
 const path = require("path");
 const { requestTraceMiddleware } = require("../middlewares/requestTraceMiddleware");
+const { verifyToken } = require("../middlewares/authMiddleware");
 
 function isDevPrivateNetworkOrigin(origin) {
   if (process.env.NODE_ENV === "production") return false;
@@ -39,9 +40,28 @@ function configureSecurity(app) {
 
   app.use(requestTraceMiddleware);
 
+  const frontendOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "http://localhost:5173")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
   app.use(
     helmet({
       crossOriginResourcePolicy: { policy: "cross-origin" },
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", "data:", "blob:", "https:"],
+          connectSrc: ["'self'", ...frontendOrigins, "ws:", "wss:"],
+          fontSrc: ["'self'", "data:"],
+          objectSrc: ["'none'"],
+          frameAncestors: ["'self'"],
+          baseUri: ["'self'"],
+          formAction: ["'self'"],
+        },
+      },
     })
   );
 
@@ -72,7 +92,7 @@ function configureSecurity(app) {
     })
   );
 
-  app.use("/uploads", express.static(path.join(__dirname, "../../uploads")));
+  app.use("/uploads", verifyToken, express.static(path.join(__dirname, "../../uploads")));
 }
 
 module.exports = { configureSecurity, isDevPrivateNetworkOrigin };

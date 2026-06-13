@@ -80,6 +80,42 @@ describe("verifyToken middleware", () => {
     expect(res.body.user).toMatchObject({ id: 1, username: "testuser" });
   });
 
+  test("✅ Cho phép truy cập khi JWT trong HttpOnly cookie sc_auth_token", async () => {
+    const token = jwt.sign(
+      { id: 7, username: "cookieuser", role: "user" },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    const res = await request(app)
+      .get("/protected")
+      .set("Cookie", `sc_auth_token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({ id: 7, username: "cookieuser" });
+  });
+
+  test("✅ Cookie được ưu tiên hơn Bearer khi cả hai có mặt", async () => {
+    const cookieToken = jwt.sign(
+      { id: 10, username: "from-cookie", role: "user" },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+    const bearerToken = jwt.sign(
+      { id: 99, username: "from-bearer", role: "user" },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    const res = await request(app)
+      .get("/protected")
+      .set("Cookie", `sc_auth_token=${encodeURIComponent(cookieToken)}`)
+      .set("Authorization", `Bearer ${bearerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({ id: 10, username: "from-cookie" });
+  });
+
   test("❌ Từ chối khi không có Authorization header", async () => {
     const res = await request(app).get("/protected");
 
@@ -122,6 +158,58 @@ describe("verifyToken middleware", () => {
       .set("Authorization", `Bearer ${fakeToken}`);
 
     expect(res.status).toBe(401);
+  });
+
+  test("❌ Production: Bearer bị tắt khi không có cookie", async () => {
+    const prevEnv = process.env.NODE_ENV;
+    const prevBearer = process.env.ALLOW_BEARER_AUTH;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.ALLOW_BEARER_AUTH;
+
+      const token = jwt.sign(
+        { id: 2, username: "bearer-only", role: "user" },
+        process.env.JWT_SECRET,
+        { expiresIn: "1h" }
+      );
+
+      const res = await request(app)
+        .get("/protected")
+        .set("Authorization", `Bearer ${token}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error?.code).toBe("BEARER_AUTH_DISABLED");
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+      if (prevBearer !== undefined) process.env.ALLOW_BEARER_AUTH = prevBearer;
+      else delete process.env.ALLOW_BEARER_AUTH;
+    }
+  });
+
+  test("✅ Production: HttpOnly cookie vẫn hoạt động khi Bearer tắt", async () => {
+    const prevEnv = process.env.NODE_ENV;
+    const prevBearer = process.env.ALLOW_BEARER_AUTH;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.ALLOW_BEARER_AUTH;
+
+      const token = jwt.sign(
+        { id: 3, username: "cookie-prod", role: "user" },
+        process.env.JWT_SECRET,
+        { expiresIn: "1h" }
+      );
+
+      const res = await request(app)
+        .get("/protected")
+        .set("Cookie", `sc_auth_token=${encodeURIComponent(token)}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.user).toMatchObject({ id: 3, username: "cookie-prod" });
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+      if (prevBearer !== undefined) process.env.ALLOW_BEARER_AUTH = prevBearer;
+      else delete process.env.ALLOW_BEARER_AUTH;
+    }
   });
 });
 

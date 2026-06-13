@@ -9,8 +9,8 @@ Khớp hướng dẫn thầy — không dùng user/path cũ ``dev`` / ``/home/de
 Giá trị cụ thể đọc từ deploy-config.json (mặc định mẫu: deploy-config.example.json).
 Sau upload: npm install --omit=dev trên server, pm2 reload pm2.config.js.
 
-Chạy (tên file có dấu cách → bắt buộc ngoặc kép):
-  python3 "release 2.py"
+Chạy:
+  python3 release_deploy.py
 Hoặc: npm run deploy
 Hoặc giống thứ tự thầy (build API là bước kiểm tra nhẹ + deploy): npm run release
 
@@ -154,10 +154,43 @@ def main():
         command_preflight = f"cd {remote_path} && npm run preflight"
         run_remote_command(command_preflight)
 
-        command_restart = f"cd {remote_path} && NODE_ENV=production pm2 reload pm2.config.js --update-env"
+        remote_pm2_path = cfg.get("remote_pm2_path") or remote_path
+        if remote_pm2_path != remote_path:
+            sync_cmd = (
+                f"rsync -a --delete "
+                f"--exclude node_modules --exclude logs --exclude uploads "
+                f"{remote_path.rstrip('/')}/ {remote_pm2_path.rstrip('/')}/"
+            )
+            print(
+                f"\nĐồng bộ code sang thư mục PM2 thực tế: {remote_pm2_path}"
+            )
+            run_remote_command(sync_cmd)
+
+        pm2_cwd = remote_pm2_path
+        command_restart = (
+            f"cd {pm2_cwd} && NODE_ENV=production pm2 reload pm2.config.js --update-env"
+        )
         run_remote_command(command_restart)
 
-        command_ls = f"cd {remote_path} && pm2 ls"
+        command_verify = (
+            f"grep -n 'session: false' {pm2_cwd}/modules/auth/authController.js | head -2"
+        )
+        run_remote_command(command_verify)
+
+        command_health = (
+            "sleep 2 && curl -sf http://127.0.0.1:2999/health "
+            "|| curl -sf http://127.0.0.1:2999/serialcommander/health"
+        )
+        try:
+            run_remote_command(command_health)
+        except RuntimeError:
+            print(
+                "\n[CẢNH BÁO] Health localhost trên VPS chưa phản hồi ngay sau reload.\n"
+                "  Deploy (upload + pm2 reload) có thể vẫn OK — kiểm tra từ máy dev:\n"
+                "  bash scripts/verify-production-deploy.sh"
+            )
+
+        command_ls = f"pm2 ls"
         run_remote_command(command_ls)
         return 0
 

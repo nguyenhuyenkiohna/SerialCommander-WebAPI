@@ -1,17 +1,10 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 const path = require("path");
-const dotenv = require("dotenv");
-
-function resolveEnvFilePath() {
-  if (process.env.ENV_FILE) return process.env.ENV_FILE;
-  if (process.env.NODE_ENV === "production") return ".env";
-  return ".env.local";
-}
 
 async function run() {
-  const envFile = resolveEnvFilePath();
-  dotenv.config({ path: envFile });
+  const { loadEnvFiles } = require("../configs/bootstrapEnv");
+  const { envFile, secretsEnv, layered } = loadEnvFiles();
 
   require("rootpath")();
   const { assertRequiredSecretsLoaded } = require("../configs/envSecrets");
@@ -29,7 +22,10 @@ async function run() {
   }
 
   await sequelize.close();
-  console.log(`[preflight] OK env=${path.basename(envFile)} schemaVersion=${schema.dbVersion}`);
+  const envLabel = layered && secretsEnv
+    ? `${path.basename(envFile)}+secrets`
+    : path.basename(envFile);
+  console.log(`[preflight] OK env=${envLabel} schemaVersion=${schema.dbVersion}`);
 }
 
 run().catch((error) => {

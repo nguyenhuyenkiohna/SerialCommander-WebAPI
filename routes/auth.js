@@ -31,11 +31,12 @@ const authResetRateLimit = createSimpleRateLimit({ windowMs: 60 * 1000, maxReque
  *           schema:
  *             type: object
  *             required:
- *               - username
+ *               - email
  *               - password
  *             properties:
- *               username:
+ *               email:
  *                 type: string
+ *                 format: email
  *               password:
  *                 type: string
  *     responses:
@@ -46,7 +47,7 @@ const authResetRateLimit = createSimpleRateLimit({ windowMs: 60 * 1000, maxReque
  *             schema:
  *               $ref: '#/components/schemas/LoginSuccessResponse'
  *       401:
- *         description: Sai tài khoản hoặc mật khẩu
+ *         description: Sai email hoặc mật khẩu
  *         content:
  *           application/json:
  *             schema:
@@ -297,5 +298,39 @@ router.post(
   validateAuth(resetPasswordValidators),
   authController.resetPassword
 );
+
+/**
+ * @swagger
+ * /api/auth/refresh:
+ *   post:
+ *     summary: Làm mới access token dùng refresh token (HttpOnly cookie sc_refresh_token)
+ *     tags: [Authentication]
+ *     responses:
+ *       200:
+ *         description: Access token mới đã được gắn vào cookie sc_auth_token
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageSuccessResponse'
+ *       401:
+ *         description: Refresh token thiếu, không hợp lệ, hoặc đã hết hạn
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post("/refresh", authController.refresh);
+
+/**
+ * @swagger
+ * /api/auth/logout:
+ *   post:
+ *     summary: Đăng xuất — xóa HttpOnly cookie sc_auth_token và sc_refresh_token
+ *     tags: [Authentication]
+ *     responses:
+ *       200:
+ *         description: Đăng xuất thành công
+ */
+router.post("/logout", authController.logout);
 
 module.exports = router;

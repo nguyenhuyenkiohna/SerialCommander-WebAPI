@@ -2,6 +2,12 @@ process.env.NODE_ENV = "test";
 
 require("rootpath")();
 
+jest.mock("kernels/scenarioSyncStatus", () => ({
+  setScenarioSyncStatus: jest.fn().mockResolvedValue(undefined),
+  recordFirestoreBatchSuccess: jest.fn(),
+  recordFirestoreBatchFailure: jest.fn().mockResolvedValue(false),
+}));
+
 jest.mock("kernels/scenarioSyncQueue", () => ({
   claimBatch: jest.fn(),
   ackBatch: jest.fn(),

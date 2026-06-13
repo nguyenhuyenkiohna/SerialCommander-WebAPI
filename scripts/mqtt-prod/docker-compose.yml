@@ -1,0 +1,33 @@
+# Mosquitto production — chạy trên VPS API (cùng máy ghi passwd).
+# Thư mục làm việc trên VPS: ~/sc-mqtt-prod (tạo bởi setup-on-vps.sh)
+#
+#   cd ~/sc-mqtt-prod && docker compose up -d
+
+name: sc-mqtt-prod
+
+services:
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: sc-mqtt-prod
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1883:1883"
+      - "8884:8884"
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./config/acl:/mosquitto/config/acl:ro
+      - ./config/passwd:/mosquitto/config/passwd
+      - ./data:/mosquitto/data
+      - ${MQTT_TLS_DIR:-./certs}:/mosquitto/certs:ro
+    environment:
+      MQTT_HEALTHCHECK_PASSWORD: ${MQTT_HEALTHCHECK_PASSWORD:-sc_mqtt_health_prod}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mosquitto_sub -h 127.0.0.1 -p 1883 -u healthcheck -P $$MQTT_HEALTHCHECK_PASSWORD -t '$$SYS/broker/version' -C 1 -W 3 || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 8s

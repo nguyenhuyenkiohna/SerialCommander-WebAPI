@@ -1,5 +1,9 @@
 const path = require("path");
-const { getStorageBucket, isFirebaseReady } = require("../../../kernels/firebaseAdmin");
+const {
+  getStorageBucket,
+  isFirebaseReady,
+  isStorageBucketReady,
+} = require("../../../kernels/firebaseAdmin");
 
 function attachmentsPrefix() {
   return (process.env.FIREBASE_STORAGE_ATTACHMENTS_PREFIX || "attachments").replace(/\/+$/, "");
@@ -47,6 +51,9 @@ function assertBucket() {
  */
 exports.saveScenarioJsonSnapshot = async (scenarioId, contentArray) => {
   try {
+    if (!(await isStorageBucketReady())) {
+      return;
+    }
     const bucket = assertBucket();
     const objectPath = `${scenarioJsonPrefix()}/${scenarioId}.json`;
     const body = JSON.stringify(

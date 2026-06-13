@@ -5,12 +5,26 @@ const jsonMap = require("json-source-map");
 /**
  * Các kiểu khối Content hợp lệ (đồng bộ với frontend SerialAction BlockType).
  */
+/** Canonical block types (ưu tiên chính tả đúng). */
 const VALID_CONTENT_TYPES = [
   "text", "dropdown", "para", "button", "button2",
-  "5directions", "slider", "slider2", "toogle", "toogle2",
+  "5directions", "slider", "slider2", "toggle", "toggle2",
   "var", "knob", "colorpicker", "numberinput", "joystick",
-  "matrix", "gauge", "progress"
+  "matrix", "gauge", "progress", "chart",
+  // Legacy typo — vẫn chấp nhận, chuẩn hóa sang toggle* + cảnh báo
+  "toogle", "toogle2",
 ];
+
+/** Alias cũ → canonical (đồng bộ SerialAction BlockType). */
+const CONTENT_TYPE_ALIASES = {
+  toogle: "toggle",
+  toogle2: "toggle2",
+};
+
+const DEPRECATED_TYPE_WARNINGS = {
+  toogle: 'Type "toogle" đã lỗi thời — dùng "toggle".',
+  toogle2: 'Type "toogle2" đã lỗi thời — dùng "toggle2".',
+};
 
 /**
  * Lấy dòng/cột từ vị trí ký tự trong chuỗi (1-based).
@@ -125,15 +139,30 @@ function validateContentArray(content, pointers) {
         line: loc ? loc.line : null,
         column: loc ? loc.column : null
       });
-    } else if (!VALID_CONTENT_TYPES.includes(item.Type)) {
-      const ptr = `${basePointer}/Type`;
-      const loc = getPositionForPath(pointers, ptr);
-      errors.push({
-        message: `"Type" của ${basePath} không hợp lệ. Giá trị hợp lệ: ${VALID_CONTENT_TYPES.join(", ")}.`,
-        path: `${basePath}.Type`,
-        line: loc ? loc.line : null,
-        column: loc ? loc.column : null
-      });
+    } else {
+      const rawType = item.Type;
+      const alias = CONTENT_TYPE_ALIASES[rawType];
+      if (alias) {
+        item.Type = alias;
+        const ptr = `${basePointer}/Type`;
+        const loc = getPositionForPath(pointers, ptr);
+        warnings.push({
+          message: DEPRECATED_TYPE_WARNINGS[rawType] || `Type "${rawType}" đã được chuẩn hóa thành "${alias}".`,
+          path: `${basePath}.Type`,
+          line: loc ? loc.line : null,
+          column: loc ? loc.column : null
+        });
+      } else if (!VALID_CONTENT_TYPES.includes(rawType)) {
+        const ptr = `${basePointer}/Type`;
+        const loc = getPositionForPath(pointers, ptr);
+        const canonicalList = [...new Set([...VALID_CONTENT_TYPES, ...Object.keys(CONTENT_TYPE_ALIASES)])];
+        errors.push({
+          message: `"Type" của ${basePath} không hợp lệ. Giá trị hợp lệ: ${canonicalList.join(", ")}.`,
+          path: `${basePath}.Type`,
+          line: loc ? loc.line : null,
+          column: loc ? loc.column : null
+        });
+      }
     }
 
     // Name (bắt buộc)

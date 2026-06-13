@@ -1,4 +1,5 @@
-const { DataTypes } = require('sequelize');
+const { DataTypes } = require("sequelize");
+const { SCENARIO_TABLE } = require("../configs/dbFieldNaming");
 
 /**
  * Defines the Sequelize model for the 'Scenarios' table.
@@ -102,7 +103,7 @@ module.exports = (sequelize) => {
       comment: 'The JSON content of the scenario'
     }
   }, {
-    tableName: 'Scenarios',
+    tableName: SCENARIO_TABLE,
     timestamps: false,
     comment: 'Table to store user-created scenarios',
     charset: 'utf8mb4',
